@@ -1,0 +1,8 @@
+tracker:
+  name: deepsort
+  max_age: 30
+  min_hits: 3
+  iou_threshold: 0.5
+  cosine_threshold: 0.25
+  nn_budget: 100
+  use_kalman_filter: true

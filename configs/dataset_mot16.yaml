@@ -1,0 +1,40 @@
+dataset:
+  root: MOT16
+  input_size: [640, 640]
+  person_class_id: 1
+  visibility_threshold: 0.0
+  embedding_visibility_threshold: 0.25
+  id_visibility_threshold: 0.25
+  include_ignore_regions: true
+  train_sequences:
+    - MOT16-02
+    - MOT16-04
+    - MOT16-09
+    - MOT16-11
+    - MOT16-13
+  val_sequences:
+    - MOT16-05
+    - MOT16-10
+  test_sequences:
+    - MOT16-01
+    - MOT16-03
+    - MOT16-06
+    - MOT16-07
+    - MOT16-08
+    - MOT16-12
+    - MOT16-14
+  num_workers: 8
+  cache_images: false
+
+augmentation:
+  horizontal_flip_prob: 0.5
+  letterbox: true
+  brightness: 0.2
+  contrast: 0.2
+  saturation: 0.15
+  hue: 0.05
+  affine_degrees: 3.0
+  affine_translate: 0.05
+  affine_scale: [0.9, 1.1]
+  motion_blur_prob: 0.1
+  blur_kernel: 5

@@ -1,0 +1,21 @@
+{
+  "settings_version": "0.0.6",
+  "datasets_dir": "/Users/jainil/PycharmProjects/deep_learning_project/datasets",
+  "weights_dir": "weights",
+  "runs_dir": "runs",
+  "uuid": "7894d830d2f7410856523a8f039870e96ace0e4ef467085e36d6840105cbe6cc",
+  "sync": true,
+  "api_key": "",
+  "openai_api_key": "",
+  "clearml": true,
+  "comet": true,
+  "dvc": true,
+  "hub": true,
+  "mlflow": true,
+  "neptune": true,
+  "raytune": true,
+  "tensorboard": false,
+  "wandb": false,
+  "vscode_msg": true,
+  "openvino_msg": true
+}

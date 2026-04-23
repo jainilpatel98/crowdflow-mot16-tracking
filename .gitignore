@@ -1,0 +1,116 @@
+# Python Virtual Environment
+.venv/
+venv/
+env/
+ENV/
+.env
+
+# Python Cache & Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# IDE & Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+.codex/
+
+# Large Model Files (Pre-trained weights)
+*.pt
+*.pth
+*.onnx
+*.pb
+*.h5
+*.weights
+
+# Datasets (DO NOT COMMIT)
+MOT16/
+data/
+datasets/
+MOT16.zip
+*.zip
+*.tar
+*.tar.gz
+*.rar
+*.7z
+
+# Training & Inference Outputs
+runs/
+output/
+outputs/
+*.log
+train.log
+*.csv
+results/
+
+# External/Downloaded Files
+__MACOSX/
+.AppleDouble/
+.LSOverride/
+TrackEval/
+
+# Temporary Files
+*.tmp
+*.temp
+*.cache
+.cache/
+*.bak
+*.backup
+
+# System Files
+Thumbs.db
+.DS_Store
+.directory
+
+# pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local Testing
+test_output/
+test_results/
+
+# Weights & Checkpoints (besides committed ones if any)
+weights/
+checkpoints/
+*.ckpt
+
+# PyTorch Lightning / HF / general checkpoints
+*.bin
+
+# Tensorboard
+events.out.tfevents.*
+
+# HuggingFace cache
+.cache/huggingface/
+
+# Python env metadata
+pip-wheel-metadata/
+
+# Logs
+wandb/
+mlruns/
+
+# Prevent accidental large file commits
+*.mp4
+*.avi
+*.mov
+*.npy
+*.npz
+
+

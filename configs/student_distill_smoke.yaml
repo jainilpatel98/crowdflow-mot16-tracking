@@ -1,0 +1,74 @@
+seed: 1337
+
+dataset:
+  config: configs/dataset_mot16.yaml
+  batch_size: 4
+
+teacher:
+  ckpt_path: runs/detect/runs/teacher/yolo26x_mot16_person/weights/best.pt
+  device: cuda
+  person_class: 0
+  freeze: true
+  feature_channels:
+    p3: 384
+    p4: 768
+    p5: 768
+  cache_root: data/teacher_cache
+  use_cache: false
+
+student:
+  backbone_name: mobilenetv3_small
+  pretrained_backbone: true
+  fpn_channels: 128
+  emb_dim: 128
+
+assigner:
+  strides:
+    p3: 8
+    p4: 16
+    p5: 32
+  area_ranges:
+    p3: [0, 2304]
+    p4: [2304, 16384]
+    p5: [16384, 1000000000]
+  center_radius: 1.5
+
+sampler:
+  balance_sequences: true
+  replacement: true
+
+optimizer:
+  name: adamw
+  lr_backbone: 0.0003
+  lr_heads: 0.001
+  weight_decay: 0.0001
+  betas: [0.9, 0.999]
+
+scheduler:
+  warmup_epochs: 1
+  min_lr_ratio: 0.05
+
+training:
+  device: cuda
+  epochs: 1
+  amp: true
+  grad_clip: 1.0
+  log_interval: 20
+  output_dir: runs/student_distill_smoke
+  temperature: 2.0
+
+phases:
+  - start_epoch: 1
+    end_epoch: 1
+    weights:
+      det: 0.5
+      cls_kd: 0.25
+      box_kd: 0.25
+      feat: 1.0
+      emb: 0.25
+      id: 0.0
+
+inference:
+  score_threshold: 0.25
+  nms_iou_threshold: 0.5
+  max_detections: 300

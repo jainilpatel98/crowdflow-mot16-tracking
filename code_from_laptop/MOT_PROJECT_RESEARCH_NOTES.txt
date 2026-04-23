@@ -1,0 +1,191 @@
+MOT PROJECT RESEARCH NOTES
+
+Date: 2026-03-23
+
+1. What this project is trying to do
+
+This repository is a multi-object tracking (MOT) course-style project built around the MOT16 benchmark.
+
+There are two main tracks in the current workspace:
+
+- code/mot16-fasterrcnn-train-eval.ipynb
+  This is the core academic pipeline. It is organized around a course-required plan:
+  1) build a pedestrian detection dataset from MOT16 ground truth,
+  2) fine-tune a pretrained Faster R-CNN detector,
+  3) run a simple IoU-based tracker on the detector outputs,
+  4) save videos and MOTChallenge-format tracking files,
+  5) evaluate tracking quality with the local MOTMetrics wrapper.
+
+- code/mot16-data-vis.ipynb
+  This is the visualization and demo notebook. It focuses on:
+  1) reading MOT16 metadata and GT annotations,
+  2) rendering GT GIFs,
+  3) checking dataset integrity,
+  4) running Ultralytics YOLO tracking with a tuned BoT-SORT config.
+
+The clean project story is:
+
+- primary baseline for the class/report: Faster R-CNN detector + simple tracker + MOT metrics
+- secondary demo/qualitative comparison: YOLO + BoT-SORT for stronger visual tracking results
+
+
+2. What already exists in the workspace
+
+- MOT16 dataset is present locally with 7 train sequences and 7 test sequences.
+- The notebooks already define train/validation splits over the MOT16 train set.
+- The local Python files Metrics.py and MOTMetrics.py are intended to wrap MOTChallenge evaluation.
+- A custom tracker config exists at code/botsort_mot16_person.yaml.
+- YOLO weights are already present locally.
+- The visualization side has at least one generated artifact:
+  output/jupyter-notebook/train_MOT16-02_all_gt_rows.gif
+
+Current project state appears partial, not finished:
+
+- the visualization notebook has been run enough to generate GT GIF output
+- the Faster R-CNN notebook has setup/training cells executed, but the inference, tracking, and full evaluation path do not appear to be completed in the saved artifacts
+- there is no clear final summary document for the MOT work in the repository yet
+
+
+3. Key official benchmark facts that matter for planning
+
+From the official MOT16 benchmark page:
+
+- MOT16 contains 14 sequences total: 7 train and 7 test.
+- Tracking is evaluated in image coordinates.
+- The train set is intended for tuning and experimentation.
+
+From the official MOTChallenge submission instructions:
+
+- parameters should be tuned on the training set, not the hidden test evaluation server
+- result files should follow the MOTChallenge text format with 10 values per line
+- for 2D tracking, x/y/z world coordinates can be filled with -1, but the file still needs 10 values
+
+Why this matters for this project:
+
+- do not claim quantitative test-set performance unless a valid MOTChallenge submission is made
+- for the class/report, the safest evaluation plan is to use held-out MOT16 train sequences and report those numbers clearly as validation or internal benchmark results
+- make sure any tracker output file exactly follows MOTChallenge formatting before spending time on evaluation
+
+
+4. Key tracker research facts relevant to the current notebook design
+
+From the Ultralytics tracking documentation:
+
+- Ultralytics supports both BoT-SORT and ByteTrack
+- the default tracker is BoT-SORT
+- tracker behavior is controlled by YAML parameters such as:
+  track_high_thresh
+  track_low_thresh
+  new_track_thresh
+  track_buffer
+  match_thresh
+  gmc_method
+  with_reid
+  model
+- ReID can improve identity consistency, but it adds computational cost
+- if the detector is not YOLO-native, ReID can fall back to a classification model
+
+Why this matters here:
+
+- the YOLO notebook is useful as a strong qualitative comparison, especially because your config already enables ReID and global motion compensation
+- however, the YOLO path is not the same as the course baseline described in the Faster R-CNN notebook
+- the report should avoid mixing the two stories together without a clear comparison section
+
+
+5. Key detector facts relevant to the current notebook design
+
+From the official Torchvision documentation for fasterrcnn_resnet50_fpn:
+
+- the model expects a list of image tensors in the 0-1 range
+- training requires target dictionaries with boxes in [x1, y1, x2, y2] format and class labels
+- inference returns boxes, labels, and scores
+- the detection module is documented as beta and can have compatibility changes
+
+Why this matters here:
+
+- the notebook design is aligned with the official API
+- a lot of project risk is not in model definition but in data formatting, box filtering, thresholding, and tracker/evaluation handoff
+
+
+6. Major project risks and likely failure points
+
+Risk 1: Evaluation dependency risk
+- MOTMetrics.py depends on MATLAB Engine and the MOT devkit path.
+- If MATLAB is not configured early, the project can look complete but fail at the evaluation stage.
+
+Risk 2: Metric mismatch risk
+- The notebook uses validation loss for detector training, but the actual project outcome should be tracker quality.
+- A detector with lower validation loss does not automatically give better ID consistency or MOTA/IDF1.
+
+Risk 3: Scope drift
+- It is easy to spend too much time on YOLO qualitative demos because they give nicer-looking outputs quickly.
+- If the class requires Faster R-CNN, the main energy should stay on completing and evaluating that path first.
+
+Risk 4: Dataset leakage / benchmark confusion
+- MOT16/test has no public GT for standard local evaluation.
+- Internal reporting should be based on a held-out split from MOT16/train and labeled clearly.
+
+Risk 5: Tracking simplicity ceiling
+- The current Faster R-CNN notebook uses a simple IoU tracker.
+- This is good for explainability and course clarity, but likely weaker than BoT-SORT/ByteTrack on identity preservation.
+
+Risk 6: Deliverable gap
+- The repository currently lacks a plain-language plan, experiment log, and final summary file.
+- This makes it harder to know what is finished, what is blocked, and what results belong in the report or class presentation.
+
+
+7. Recommended project framing
+
+The strongest way to frame this project is:
+
+- Goal:
+  Build an understandable MOT16 pedestrian-tracking baseline using Faster R-CNN plus a simple tracker, then compare it qualitatively against a stronger YOLO + BoT-SORT demo pipeline.
+
+- Main scientific question:
+  Can a course-friendly detection-plus-tracking pipeline produce coherent pedestrian tracks on MOT16, and where does it break down?
+
+- Main deliverables:
+  1) detector training summary
+  2) tracker outputs in MOTChallenge format
+  3) quantitative results on held-out train sequences
+  4) qualitative GIF/video examples
+  5) a short comparison against the YOLO demo pipeline
+
+
+8. Recommended success criteria
+
+Minimum success:
+
+- Faster R-CNN notebook runs end-to-end on at least one validation sequence
+- tracker output file is generated in valid MOTChallenge format
+- at least one quantitative metric set is produced
+- at least one qualitative video or GIF is produced
+
+Good project result:
+
+- evaluation is run on both validation sequences
+- results are summarized in a compact table
+- one short error analysis section explains common failures such as misses, ID switches, and crowd scenes
+
+Strong project result:
+
+- a clean comparison is made between:
+  1) Faster R-CNN + IoU tracker
+  2) YOLO + BoT-SORT
+- the report explains why one pipeline is better visually or quantitatively
+
+
+9. Sources used for this planning
+
+Official MOT16 benchmark page:
+https://motchallenge.net/data/MOT16/
+
+Official MOTChallenge submission instructions:
+https://motchallenge.net/instructions/
+
+Official Ultralytics tracking documentation:
+https://docs.ultralytics.com/modes/track/
+
+Official Torchvision Faster R-CNN documentation:
+https://docs.pytorch.org/vision/stable/models/generated/torchvision.models.detection.fasterrcnn_resnet50_fpn.html
+

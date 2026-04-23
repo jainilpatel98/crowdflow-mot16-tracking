@@ -1,0 +1,23 @@
+teacher:
+  model: code/yolo26x.pt
+  device: cuda
+  epochs: 1
+  imgsz: 640
+  batch: 16
+  workers: 8
+  lr0: 0.001
+  cos_lr: true
+  patience: 10
+  project: runs/teacher
+  name: yolo26x_mot16_person
+
+dataset:
+  root: MOT16
+  converted_root: data/mot16_yolo_person
+  yaml_path: data/mot16_yolo_person/mot16_person.yaml
+  val_sequences:
+    - MOT16-05
+    - MOT16-10
+
+export:
+  best_ckpt: runs/teacher/yolo26x_mot16_person/weights/best.pt
