@@ -68,7 +68,7 @@ training:
   temperature: 2.0
 
 phases:
-  - start_epoch: 1
+  - start_epoch: 80
     end_epoch: 15
     weights:
       det: 0.5
