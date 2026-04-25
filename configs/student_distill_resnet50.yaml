@@ -60,7 +60,7 @@ scheduler:
 
 training:
   device: cuda
-  epochs: 80
+  epochs: 1
   amp: true
   grad_clip: 1.0
   log_interval: 20

@@ -1,17 +1,35 @@
 from __future__ import annotations
 
+import inspect
 import numpy as np
+import torch
 
 
 class StrongSortAdapter:
-    def __init__(self, device: str = "cuda", **kwargs) -> None:
+    def __init__(
+        self,
+        device: str | torch.device = "cuda",
+        reid_weights: str | None = None,
+        half: bool | None = None,
+        **kwargs,
+    ) -> None:
         try:
-            from boxmot import StrongSort
+            from boxmot.trackers.strongsort.strongsort import StrongSort
         except ImportError as exc:
             raise ImportError(
                 "StrongSORT support requires the `boxmot` package."
             ) from exc
-        self.tracker = StrongSort(device=device, **kwargs)
+
+        device_obj = device if isinstance(device, torch.device) else torch.device(device)
+        tracker_kwargs = dict(kwargs)
+        signature = inspect.signature(StrongSort.__init__)
+
+        if "reid_weights" in signature.parameters:
+            tracker_kwargs.setdefault("reid_weights", reid_weights or "osnet_x0_25_msmt17.pt")
+        if "half" in signature.parameters:
+            tracker_kwargs.setdefault("half", half if half is not None else device_obj.type != "cpu")
+
+        self.tracker = StrongSort(device=device_obj, **tracker_kwargs)
 
     def update(self, detections: list[dict], image=None) -> list[dict]:
         if not detections:
