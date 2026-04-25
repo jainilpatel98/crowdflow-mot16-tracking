@@ -3,7 +3,12 @@
 # QUICK_START.sh — MOT16 YOLO-to-ResNet50 Distillation Pipeline
 # =============================================================================
 #
-# USAGE:  ./QUICK_START.sh [command]
+# USAGE:  ./QUICK_START.sh [command] [--gpus N]
+#
+# OPTIONS:
+#   --gpus N    Number of GPUs to use for torchrun (default: 4).
+#               Overrides the NGPU environment variable.
+#               Example:  ./QUICK_START.sh train --gpus 2
 #
 # COMMANDS:
 #   train       Full 80-epoch ResNet50 distillation (default, recommended)
@@ -37,7 +42,7 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 VENV="$ROOT/.venv/bin/python"
 # If no .venv, fall back to whatever python3 is active
 PYTHON="${VENV:-python3}"
-NGPU="${NGPU:-4}"    # set NGPU=1 to run single-GPU, e.g.: NGPU=1 ./QUICK_START.sh train
+NGPU="${NGPU:-4}"    # default 4; override via --gpus N flag or NGPU=N env var
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -285,6 +290,12 @@ do_help() {
     ./QUICK_START.sh check
 
   ─────────────────────────────────────────────────────────────────────────────
+  GPU COUNT (--gpus N):
+    • CLI flag:      --gpus N   (takes priority over everything)
+    • Env variable:  NGPU=N ./QUICK_START.sh train
+    • Default:       4
+    • Example:       ./QUICK_START.sh train --gpus 1
+
   USE_CACHE explained:
     • Set in YAML:   teacher.use_cache: true/false  (permanent for that config)
     • CLI override:  --use-cache flag                (one-off, OR with YAML)
@@ -295,6 +306,26 @@ EOF
 }
 
 # ── main ─────────────────────────────────────────────────────────────────────
+
+# Parse --gpus N from any position in the argument list
+ARGS=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --gpus)
+            NGPU="$2"
+            shift 2
+            ;;
+        --gpus=*)
+            NGPU="${1#--gpus=}"
+            shift
+            ;;
+        *)
+            ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+set -- "${ARGS[@]}"
 
 case "${1:-help}" in
     train)        do_train ;;
