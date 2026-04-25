@@ -2,7 +2,7 @@ seed: 1337
 
 dataset:
   config: configs/dataset_mot16.yaml
-  batch_size: 16
+  batch_size: 12
 
 teacher:
   ckpt_path: code/yolo26x.pt
@@ -13,13 +13,15 @@ teacher:
     p3: 384
     p4: 768
     p5: 768
+  # cache_root is used only when --use-cache is passed to train_student.py
   cache_root: data/teacher_cache
+  # Default: use_cache=false (live teacher; same augmented input for both teacher and student)
   use_cache: false
 
 student:
-  backbone_name: mobilenetv3_small
+  backbone_name: resnet50        # default; override with --backbone CLI flag
   pretrained_backbone: true
-  fpn_channels: 128
+  fpn_channels: 256
   emb_dim: 128
 
 assigner:
@@ -39,8 +41,8 @@ sampler:
 
 optimizer:
   name: adamw
-  lr_backbone: 0.0003
-  lr_heads: 0.001
+  lr_backbone: 0.0001
+  lr_heads: 0.0005
   weight_decay: 0.0001
   betas: [0.9, 0.999]
 
@@ -50,7 +52,7 @@ scheduler:
 
 training:
   device: cuda
-  epochs: 60
+  epochs: 80              # extended from 60 (Issue 5 — squeeze more from small data)
   amp: true
   grad_clip: 1.0
   log_interval: 20
@@ -59,7 +61,7 @@ training:
 
 phases:
   - start_epoch: 1
-    end_epoch: 10
+    end_epoch: 15         # Phase 1 extended: longer feature alignment warm-up
     weights:
       det: 0.5
       cls_kd: 0.25
@@ -67,8 +69,8 @@ phases:
       feat: 1.0
       emb: 0.25
       id: 0.0
-  - start_epoch: 11
-    end_epoch: 40
+  - start_epoch: 16
+    end_epoch: 50
     weights:
       det: 1.0
       cls_kd: 0.5
@@ -76,8 +78,8 @@ phases:
       feat: 0.25
       emb: 0.5
       id: 0.5
-  - start_epoch: 41
-    end_epoch: 60
+  - start_epoch: 51
+    end_epoch: 80
     weights:
       det: 1.0
       cls_kd: 0.25

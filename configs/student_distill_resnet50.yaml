@@ -13,8 +13,18 @@ teacher:
     p3: 384
     p4: 768
     p5: 768
+  # --- Cache control ---
+  # Two equivalent ways to enable cache mode:
+  #   1. Set use_cache: true here  (applies whenever this config is used)
+  #   2. Pass --use-cache on the command line  (overrides this value)
+  #
+  # DEFAULT = false (live teacher; teacher and student share the same augmented input).
+  # Set to true only if GPU memory is tight or teacher inference is too slow.
+  # WARNING: cache was computed on canonical (non-augmented) images, so
+  #          feature-KD and box-KD signals will have a spatial mismatch with
+  #          the augmented student input. Detection + ID losses are unaffected.
+  use_cache: false
   cache_root: data/teacher_cache
-  use_cache: true
 
 student:
   backbone_name: resnet50
@@ -50,7 +60,7 @@ scheduler:
 
 training:
   device: cuda
-  epochs: 60
+  epochs: 80
   amp: true
   grad_clip: 1.0
   log_interval: 20
@@ -59,7 +69,7 @@ training:
 
 phases:
   - start_epoch: 1
-    end_epoch: 10
+    end_epoch: 15
     weights:
       det: 0.5
       cls_kd: 0.25
@@ -67,8 +77,8 @@ phases:
       feat: 1.0
       emb: 0.25
       id: 0.0
-  - start_epoch: 11
-    end_epoch: 40
+  - start_epoch: 16
+    end_epoch: 50
     weights:
       det: 1.0
       cls_kd: 0.5
@@ -76,8 +86,8 @@ phases:
       feat: 0.25
       emb: 0.5
       id: 0.5
-  - start_epoch: 41
-    end_epoch: 60
+  - start_epoch: 51
+    end_epoch: 80
     weights:
       det: 1.0
       cls_kd: 0.25

@@ -27,14 +27,31 @@ dataset:
   cache_images: false
 
 augmentation:
-  horizontal_flip_prob: 0.5
+  # YOLO-style heavy augmentation (Issue 7)
   letterbox: true
-  brightness: 0.2
-  contrast: 0.2
-  saturation: 0.15
-  hue: 0.05
+
+  # Mosaic: combine 4 random frames into 1 (biggest diversity boost for small datasets)
+  mosaic_prob: 0.8
+
+  # Copy-paste: paste random person instances from other frames (simulates occlusion)
+  copy_paste_prob: 0.3
+
+  # HSV color jitter (YOLO defaults)
+  hue: 0.015
+  saturation: 0.7
+  brightness: 0.4          # maps to HSV-V gain
+
+  # Large-scale jitter (was 0.9-1.1; now matches YOLO's 0.5-2.0)
+  affine_scale: [0.5, 2.0]
+
+  # Geometric
+  horizontal_flip_prob: 0.5
   affine_degrees: 3.0
   affine_translate: 0.05
-  affine_scale: [0.9, 1.1]
-  motion_blur_prob: 0.1
+
+  # Motion blur (simulates fast-moving pedestrians)
+  motion_blur_prob: 0.15
   blur_kernel: 5
+
+  # Random erase (simulate occlusion boxes)
+  erase_prob: 0.2

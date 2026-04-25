@@ -1,5 +1,27 @@
 #!/usr/bin/env python3
-from __future__ import annotations
+"""Cache teacher outputs to disk for offline student training.
+
+.. deprecated::
+    The default training mode is now **live distillation** (``use_cache=false``),
+    where the teacher runs on the same augmented input as the student.  This
+    ensures full spatial alignment between teacher and student signals and
+    removes the need for a separate caching step.
+
+    Use this script only if you want to trade accuracy for training speed by
+    pre-computing teacher outputs on *deterministic* (non-augmented) images.
+    When ``--use-cache`` is active during student training, the feature-KD and
+    box-KD losses will see a spatial mismatch because the student sees augmented
+    images while the cached teacher outputs were computed on canonical images.
+    Detection (GT) and ID losses are unaffected by this mismatch.
+
+Usage (only if you explicitly need cache mode)::
+
+    python tools/cache_teacher_outputs.py --config configs/student_distill.yaml --split train
+    python tools/cache_teacher_outputs.py --config configs/student_distill.yaml --split val
+    # Then train with:
+    python tools/train_student.py --config configs/student_distill.yaml --use-cache
+"""
+
 
 import argparse
 import json

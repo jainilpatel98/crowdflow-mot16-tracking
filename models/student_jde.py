@@ -29,10 +29,10 @@ class ROIProjector(nn.Module):
 class StudentJDE(nn.Module):
     def __init__(
         self,
-        backbone_name: str = "mobilenetv3_small",
+        backbone_name: str = "resnet50",
         emb_dim: int = 128,
         num_classes: int = 1,
-        fpn_channels: int = 128,
+        fpn_channels: int = 256,
         pretrained_backbone: bool = False,
         num_id_classes: int = 0,
     ) -> None:

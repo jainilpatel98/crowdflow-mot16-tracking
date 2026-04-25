@@ -19,6 +19,7 @@ from engine.inference import decode_student_outputs
 from models.student_jde import StudentJDE
 from trackers.deepsort_adapter import DeepSortAdapter
 from trackers.strongsort_adapter import StrongSortAdapter
+from utils.checkpoint import validate_checkpoint_shapes
 from utils.config import load_yaml
 
 
@@ -67,6 +68,7 @@ def main() -> int:
         pretrained_backbone=False,
         num_id_classes=id_classes,
     ).to(device)
+    validate_checkpoint_shapes(checkpoint, model, feature_adapters=None)
     model.load_state_dict(checkpoint["student"])
     model.eval()
 

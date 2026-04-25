@@ -8,6 +8,7 @@ from torch.nn import functional as F
 from torchvision.ops import roi_align
 from ultralytics import YOLO
 
+
 def _split_flattened(flat_tensor: torch.Tensor, feature_maps: list[torch.Tensor]) -> list[torch.Tensor]:
     splits = [feature.shape[-2] * feature.shape[-1] for feature in feature_maps]
     chunks = torch.split(flat_tensor, splits, dim=-1)
@@ -18,6 +19,75 @@ def _split_flattened(flat_tensor: torch.Tensor, feature_maps: list[torch.Tensor]
         reshaped.append(chunk.view(batch, channels, height, width))
     return reshaped
 
+
+# ---------------------------------------------------------------------------
+# Teacher ROI projector  (Issue 2 fix)
+# ---------------------------------------------------------------------------
+
+class TeacherROIProjector(nn.Module):
+    """A trainable MLP projector that extracts identity embeddings from the
+    teacher's p3 feature map via ROI-Align.
+
+    Architecture mirrors the student's ROIProjector so both operate in the
+    same embedding space, enabling meaningful cosine alignment.
+
+    This module is trained (not frozen) alongside the student, supervised by
+    the ID cross-entropy loss. Its outputs serve as soft embedding targets for
+    the student's embedding KD cosine loss.
+    """
+
+    def __init__(self, in_channels: int, emb_dim: int) -> None:
+        super().__init__()
+        self.emb_dim = emb_dim
+        hidden = emb_dim * 4
+        self.proj = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(in_channels * 7 * 7, hidden),
+            nn.BatchNorm1d(hidden),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden, emb_dim),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """x: pooled ROI crops (N, C, 7, 7)."""
+        return F.normalize(self.proj(x), dim=-1)
+
+    def extract_embeddings(
+        self,
+        p3_feature: torch.Tensor,
+        boxes_per_image: Iterable[torch.Tensor],
+        image_size: tuple[int, int],
+    ) -> torch.Tensor:
+        """ROI-Align on p3 then project to emb_dim.
+
+        Args:
+            p3_feature:     (B, C, H, W) teacher p3 feature map
+            boxes_per_image: list[Tensor (N_i, 4)] xyxy boxes in image space
+            image_size:     (H, W) of the input image
+
+        Returns:
+            (total_boxes, emb_dim) L2-normalised embeddings
+        """
+        image_h, image_w = image_size
+        scale = p3_feature.shape[-1] / float(image_w)
+        rois = []
+        for batch_index, boxes in enumerate(boxes_per_image):
+            if boxes.numel() == 0:
+                continue
+            batch_col = torch.full((boxes.shape[0], 1), batch_index,
+                                   device=boxes.device, dtype=boxes.dtype)
+            rois.append(torch.cat((batch_col, boxes), dim=1))
+        if not rois:
+            return p3_feature.new_zeros((0, self.emb_dim))
+        rois_tensor = torch.cat(rois, dim=0)
+        pooled = roi_align(p3_feature, rois_tensor, output_size=(7, 7),
+                           spatial_scale=scale, aligned=True)
+        return self.forward(pooled)
+
+
+# ---------------------------------------------------------------------------
+# Teacher YOLO wrapper
+# ---------------------------------------------------------------------------
 
 class TeacherWrapper(nn.Module):
     def __init__(
@@ -43,7 +113,7 @@ class TeacherWrapper(nn.Module):
         feature_maps = teacher_many["feats"]
 
         logits_levels = _split_flattened(
-            teacher_many["scores"][:, self.person_class : self.person_class + 1, :],
+            teacher_many["scores"][:, self.person_class: self.person_class + 1, :],
             feature_maps,
         )
         raw_box_levels = _split_flattened(teacher_many["boxes"], feature_maps)
@@ -72,29 +142,5 @@ class TeacherWrapper(nn.Module):
             "boxes": filtered_boxes,
             "scores": filtered_scores,
             "labels": filtered_labels,
-            "spatial_feat": p5,
+            "spatial_feat": p3,   # use p3 (finest) for ROI projector input
         }
-
-    @torch.no_grad()
-    def extract_roi_embeddings(
-        self,
-        spatial_feat: torch.Tensor,
-        boxes_per_image: Iterable[torch.Tensor],
-        image_size: tuple[int, int],
-    ) -> torch.Tensor:
-        image_h, image_w = image_size
-        scale = spatial_feat.shape[-1] / float(image_w)
-        rois = []
-        for batch_index, boxes in enumerate(boxes_per_image):
-            if boxes.numel() == 0:
-                continue
-            batch_column = torch.full((boxes.shape[0], 1), batch_index, device=boxes.device, dtype=boxes.dtype)
-            rois.append(torch.cat((batch_column, boxes), dim=1))
-        if not rois:
-            return spatial_feat.new_zeros((0, self.emb_dim))
-        rois_tensor = torch.cat(rois, dim=0)
-        pooled = roi_align(spatial_feat, rois_tensor, output_size=(7, 7), spatial_scale=scale, aligned=True)
-        pooled = pooled.mean(dim=(-1, -2))
-        if pooled.shape[1] != self.emb_dim:
-            pooled = F.adaptive_avg_pool1d(pooled.unsqueeze(1), self.emb_dim).squeeze(1)
-        return F.normalize(pooled, dim=-1)

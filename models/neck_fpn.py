@@ -26,9 +26,14 @@ class TinyFPN(nn.Module):
         self.lateral_c4 = ConvBNAct(in_channels["c4"], out_channels, kernel_size=1)
         self.lateral_c5 = ConvBNAct(in_channels["c5"], out_channels, kernel_size=1)
 
+        # Top-down smoothing convs
         self.out_p3 = ConvBNAct(out_channels, out_channels, kernel_size=3)
         self.out_p4 = ConvBNAct(out_channels, out_channels, kernel_size=3)
         self.out_p5 = ConvBNAct(out_channels, out_channels, kernel_size=3)
+
+        # Bottom-up path: separate modules so weights are not shared with top-down
+        self.out2_p4 = ConvBNAct(out_channels, out_channels, kernel_size=3)
+        self.out2_p5 = ConvBNAct(out_channels, out_channels, kernel_size=3)
 
         self.down_p3 = ConvBNAct(out_channels, out_channels, kernel_size=3, stride=2)
         self.down_p4 = ConvBNAct(out_channels, out_channels, kernel_size=3, stride=2)
@@ -40,10 +45,12 @@ class TinyFPN(nn.Module):
         p4 = self.lateral_c4(c4) + F.interpolate(p5, size=c4.shape[-2:], mode="nearest")
         p3 = self.lateral_c3(c3) + F.interpolate(p4, size=c3.shape[-2:], mode="nearest")
 
+        # Top-down smoothing
         p3 = self.out_p3(p3)
         p4 = self.out_p4(p4)
         p5 = self.out_p5(p5)
 
-        p4 = self.out_p4(p4 + self.down_p3(p3))
-        p5 = self.out_p5(p5 + self.down_p4(p4))
+        # Bottom-up path (separate output convs — fixes weight-sharing bug)
+        p4 = self.out2_p4(p4 + self.down_p3(p3))
+        p5 = self.out2_p5(p5 + self.down_p4(p4))
         return {"p3": p3, "p4": p4, "p5": p5}

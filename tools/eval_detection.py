@@ -16,6 +16,7 @@ from datasets.collate import mot_collate_fn
 from datasets.mot16_dataset import build_mot16_datasets
 from engine.evaluator import evaluate_detection
 from models.student_jde import StudentJDE
+from utils.checkpoint import validate_checkpoint_shapes
 from utils.config import load_yaml
 
 
@@ -60,6 +61,7 @@ def main() -> int:
         pretrained_backbone=False,
         num_id_classes=id_classes,
     ).to(device)
+    validate_checkpoint_shapes(checkpoint, model, feature_adapters=None)
     model.load_state_dict(checkpoint["student"])
 
     summary = evaluate_detection(
