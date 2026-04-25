@@ -60,7 +60,7 @@ scheduler:
 
 training:
   device: cuda
-  epochs: 1
+  epochs: 80
   amp: true
   grad_clip: 1.0
   log_interval: 20
@@ -68,7 +68,7 @@ training:
   temperature: 2.0
 
 phases:
-  - start_epoch: 80
+  - start_epoch: 1
     end_epoch: 15
     weights:
       det: 0.5
