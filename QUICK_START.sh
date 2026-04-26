@@ -168,24 +168,28 @@ do_track() {
     #       --tracker-config configs/tracker.yaml \
     #       --checkpoint runs/student_distill_resnet50/best.pt \
     #       --sequence-dir MOT16/train/MOT16-10 \
-    #       --output outputs/student_tracking/MOT16-10.txt
+    #       --output outputs/student_tracking/MOT16-10.txt \
+    #       --output-video outputs/student_tracking/MOT16-10.mp4
     #
     # Available sequences (val split): MOT16-05, MOT16-10
     # ───────────────────────────────────────────────────────────────────────
     local seq="${1:-MOT16/train/MOT16-10}"
     local out="outputs/student_tracking/$(basename "$seq").txt"
+    local out_video="outputs/student_tracking/$(basename "$seq").mp4"
     local ckpt="${2:-runs/student_distill_resnet50/best.pt}"
     cd "$ROOT"
     mkdir -p "$(dirname "$out")"
-    _cmd "python tools/eval_tracking.py --sequence-dir $seq --output $out"
+    _cmd "python tools/eval_tracking.py --sequence-dir $seq --output $out --output-video $out_video"
     "$PYTHON" tools/eval_tracking.py \
         --config configs/student_distill_resnet50.yaml \
         --tracker-config configs/tracker.yaml \
         --checkpoint "$ckpt" \
         --sequence-dir "$seq" \
-        --output "$out"
+        --output "$out" \
+        --output-video "$out_video"
     echo ""
     echo "  Results saved to: $out"
+    echo "  Tracking video saved to: $out_video"
 }
 
 do_monitor() {
