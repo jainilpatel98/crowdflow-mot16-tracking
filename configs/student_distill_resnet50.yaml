@@ -29,8 +29,9 @@ teacher:
 student:
   backbone_name: resnet50
   pretrained_backbone: true
-  fpn_channels: 256
+  fpn_channels: 384       # widened 256→384 (#7): p3 now matches teacher p3 channels exactly
   emb_dim: 128
+  roi_dropout: 0.3        # (#3) regularise ROI projector to prevent ReID overfitting
 
 assigner:
   strides:
@@ -74,7 +75,7 @@ phases:
       det: 0.5
       cls_kd: 0.25
       box_kd: 0.25
-      feat: 1.0
+      feat: 5.0           # (#2) raised from 1.0 — adapter was gradient-starved vs cls_kd/box_kd
       emb: 0.25
       id: 0.0
   - start_epoch: 16
@@ -83,20 +84,20 @@ phases:
       det: 1.0
       cls_kd: 0.5
       box_kd: 0.75
-      feat: 0.25
+      feat: 2.0           # (#2) raised from 0.25 — keep feat_kd alive in mid training
       emb: 0.5
       id: 0.5
   - start_epoch: 51
     end_epoch: 80
     weights:
-      det: 1.0
-      cls_kd: 0.25
-      box_kd: 0.25
-      feat: 0.1
-      emb: 1.0
-      id: 1.0
+      det: 2.0            # (#3) raised from 1.0 — prioritise recall recovery
+      cls_kd: 0.5
+      box_kd: 0.5
+      feat: 0.5           # (#2) raised from 0.1 — keep signal from dying in fine-tune phase
+      emb: 0.3            # (#3) reduced from 1.0 — limit ReID overfitting
+      id: 0.5             # (#3) reduced from 1.0 — limit ReID overfitting
 
 inference:
-  score_threshold: 0.25
+  score_threshold: 0.05   # lowered from 0.25 — re-eval showed recall recovered 32%→43% at 0.05
   nms_iou_threshold: 0.5
   max_detections: 300

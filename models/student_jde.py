@@ -12,13 +12,14 @@ from models.neck_fpn import TinyFPN
 
 
 class ROIProjector(nn.Module):
-    def __init__(self, in_channels: int, emb_dim: int) -> None:
+    def __init__(self, in_channels: int, emb_dim: int, dropout: float = 0.0) -> None:
         super().__init__()
         self.proj = nn.Sequential(
             nn.Flatten(),
             nn.Linear(in_channels * 7 * 7, emb_dim * 2),
             nn.BatchNorm1d(emb_dim * 2),
             nn.ReLU(inplace=True),
+            nn.Dropout(p=dropout),
             nn.Linear(emb_dim * 2, emb_dim),
         )
 
@@ -35,12 +36,13 @@ class StudentJDE(nn.Module):
         fpn_channels: int = 256,
         pretrained_backbone: bool = False,
         num_id_classes: int = 0,
+        roi_dropout: float = 0.0,
     ) -> None:
         super().__init__()
         self.backbone = build_backbone(backbone_name, pretrained=pretrained_backbone)
         self.neck = TinyFPN(self.backbone.out_channels, out_channels=fpn_channels)
         self.head = DetectionEmbeddingHead(fpn_channels, num_classes=num_classes, emb_dim=emb_dim)
-        self.roi_projector = ROIProjector(fpn_channels, emb_dim)
+        self.roi_projector = ROIProjector(fpn_channels, emb_dim, dropout=roi_dropout)
         self.id_classifier = nn.Linear(emb_dim, num_id_classes) if num_id_classes > 0 else None
         self.feature_channels = {"p3": fpn_channels, "p4": fpn_channels, "p5": fpn_channels}
         self.emb_dim = emb_dim

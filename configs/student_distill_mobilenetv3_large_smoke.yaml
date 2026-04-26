@@ -21,6 +21,7 @@ student:
   pretrained_backbone: true
   fpn_channels: 192
   emb_dim: 128
+  roi_dropout: 0.3
 
 assigner:
   strides:
@@ -64,11 +65,11 @@ phases:
       det: 1.0
       cls_kd: 0.5
       box_kd: 0.75
-      feat: 0.25
+      feat: 2.0
       emb: 0.5
       id: 0.5
 
 inference:
-  score_threshold: 0.25
+  score_threshold: 0.05
   nms_iou_threshold: 0.5
   max_detections: 300

@@ -4,10 +4,21 @@ from torch import nn
 
 
 class FeatureAdapter(nn.Module):
+    """Projects student FPN features to teacher feature space for feature-KD.
+
+    Uses Conv→BN→ReLU→Conv→BN (two-layer) to give the adapter enough
+    expressiveness to learn a non-trivial alignment.  A single linear
+    Conv→BN was too weak — the adapter output was dominated by the much
+    larger cls_kd / box_kd loss terms and barely received any gradient.
+    """
     def __init__(self, in_channels: int, out_channels: int) -> None:
         super().__init__()
+        mid = max(in_channels, out_channels)
         self.block = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False),
+            nn.Conv2d(in_channels, mid, kernel_size=1, bias=False),
+            nn.BatchNorm2d(mid),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(mid, out_channels, kernel_size=1, bias=False),
             nn.BatchNorm2d(out_channels),
         )
 

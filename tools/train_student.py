@@ -131,6 +131,7 @@ def main() -> int:
     backbone_name = args.backbone or config["student"].get("backbone_name", "resnet50")
     fpn_channels  = config["student"]["fpn_channels"]
     emb_dim       = config["student"]["emb_dim"]
+    roi_dropout   = float(config["student"].get("roi_dropout", 0.0))
 
     student = StudentJDE(
         backbone_name=backbone_name,
@@ -139,6 +140,7 @@ def main() -> int:
         fpn_channels=fpn_channels,
         pretrained_backbone=config["student"].get("pretrained_backbone", True),
         num_id_classes=train_dataset.num_identities,
+        roi_dropout=roi_dropout,
     ).to(device)
 
     teacher = None
