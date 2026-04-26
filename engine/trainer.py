@@ -24,6 +24,7 @@ from utils.logger import SmoothedValue
 # ---------------------------------------------------------------------------
 
 class PhaseWeightSchedule:
+    """Legacy fixed-phase schedule. Kept for backward compatibility with old configs."""
     def __init__(self, phases: list[dict[str, Any]]) -> None:
         self.phases = phases
 
@@ -32,6 +33,45 @@ class PhaseWeightSchedule:
             if phase["start_epoch"] <= epoch <= phase["end_epoch"]:
                 return phase["weights"]
         return self.phases[-1]["weights"]
+
+
+class LossRampSchedule:
+    """Per-loss piecewise-linear weight schedule.
+
+    Config format (under ``loss_schedule`` key)::
+
+        loss_schedule:
+          det:
+            - [1, 5, 0.3, 1.0]   # [epoch_start, epoch_end, w_start, w_end]
+            - [5, 80, 1.0, 1.0]
+          cls_kd:
+            - [1, 3, 0.03, 0.03]
+            ...
+
+    The weight at ``epoch`` in segment ``[start, end, w0, w1]`` is linearly
+    interpolated.  If ``epoch`` falls after all segments, the last ``w_end``
+    is returned.  Losses absent from the schedule default to 0.
+    """
+    _ALL_LOSSES = ("det", "cls_kd", "box_kd", "feat", "emb", "id")
+
+    def __init__(self, schedule: dict[str, list[list[float]]]) -> None:
+        self.schedule = schedule
+
+    def _weight(self, loss_name: str, epoch: int) -> float:
+        segments = self.schedule.get(loss_name, [])
+        for seg in segments:
+            s_start, s_end, w0, w1 = seg
+            if s_start <= epoch <= s_end:
+                span = s_end - s_start
+                if span == 0:
+                    return float(w1)
+                return float(w0 + (w1 - w0) * (epoch - s_start) / span)
+        if segments:
+            return float(segments[-1][3])   # last w_end
+        return 0.0
+
+    def for_epoch(self, epoch: int) -> dict[str, float]:
+        return {name: self._weight(name, epoch) for name in self._ALL_LOSSES}
 
 
 # ---------------------------------------------------------------------------
@@ -140,7 +180,7 @@ class DistillationTrainer:
         optimizer,
         scheduler,
         device: torch.device,
-        phases: list[dict[str, Any]],
+        phases,                         # list[dict] (old) or dict (new loss_schedule)
         output_dir: str | Path,
         amp: bool = True,
         grad_clip: float = 1.0,
@@ -148,6 +188,8 @@ class DistillationTrainer:
         use_teacher_cache: bool = False,
         embedding_min_visibility: float = 0.25,
         id_min_visibility: float = 0.25,
+        id_label_smoothing: float = 0.0,
+        checkpoint_interval: int = 5,
         logger=None,
     ) -> None:
         self.student_model = student_model
@@ -165,10 +207,18 @@ class DistillationTrainer:
         self.grad_clip = grad_clip
         self.temperature = temperature
         self.use_teacher_cache = use_teacher_cache
+        self.id_label_smoothing = id_label_smoothing
+        self.checkpoint_interval = checkpoint_interval
         self.logger = logger
         self.scaler = torch.amp.GradScaler("cuda", enabled=amp and device.type == "cuda")
-        self.phase_schedule = PhaseWeightSchedule(phases)
-        self.best_val = float("inf")
+        # Auto-detect schedule format: dict → LossRampSchedule, list → PhaseWeightSchedule
+        if isinstance(phases, dict):
+            self.phase_schedule = LossRampSchedule(phases)
+        else:
+            self.phase_schedule = PhaseWeightSchedule(phases)
+        # best.pt is saved based on val det loss (not total val loss which includes
+        # cls_kd and id_loss and is unreliable across phase transitions).
+        self.best_val_det = float("inf")
         self.embedding_min_visibility = embedding_min_visibility
         self.id_min_visibility = id_min_visibility
 
@@ -243,15 +293,19 @@ class DistillationTrainer:
             adapters=self._adapters(),
         )
 
-        # --- Embedding KD (student ROI ↔ teacher ROI projector) ---
+        # --- Embedding KD and ID loss (student ROI ↔ teacher ROI projector) ---
+        # CRITICAL: FPN features are detached before ROI pooling so that emb_kd and
+        # id_loss gradients do NOT flow back through the FPN. This prevents these
+        # losses from overwriting the detection representations built by det/cls_kd/box_kd.
+        # Only the ROI projector and id_classifier are trained by these losses.
         image_size = tuple(targets[0]["image_size"].tolist())
         emb_boxes, _ = _select_supervision_boxes(targets, self.embedding_min_visibility)
-
-        student_roi = student_outputs.get("roi_embeddings")
-        if student_roi is None:
-            student_roi = self._student().extract_roi_embeddings(
-                student_outputs, boxes_per_image=emb_boxes, image_size=image_size,
-            )
+        detached_features = {k: v.detach() for k, v in student_outputs["features"].items()}
+        student_roi = self._student().extract_roi_embeddings(
+            {"features": detached_features},
+            boxes_per_image=emb_boxes,
+            image_size=image_size,
+        )
 
         # Teacher embedding: use trainable projector on p3 (live or cached)
         tea_proj = self._tea_proj()
@@ -271,7 +325,6 @@ class DistillationTrainer:
                 else student_roi.new_zeros((0, student_roi.shape[-1]))
             )
         elif tea_proj is not None:
-            # Use trainable teacher projector on p3 (same spatial_feat = p3)
             teacher_roi = tea_proj.extract_embeddings(
                 teacher_outputs["spatial_feat"],
                 boxes_per_image=emb_boxes,
@@ -282,26 +335,31 @@ class DistillationTrainer:
 
         emb_kd = embedding_cosine_loss(student_roi, teacher_roi)
 
-        # --- ID loss (student) ---
+        # --- ID loss (student, with label smoothing) ---
+        # id_embeddings also come from detached FPN features (via student_roi above).
         id_boxes, id_targets = _select_supervision_boxes(targets, self.id_min_visibility)
         if weights["id"] > 0.0 and id_targets.numel() > 0:
-            id_logits = student_outputs.get("id_logits")
-            if id_logits is None:
-                if self.id_min_visibility == self.embedding_min_visibility:
-                    id_embeddings = student_roi
-                else:
-                    id_embeddings = student_outputs.get("id_embeddings")
-                    if id_embeddings is None:
-                        id_embeddings = self._student().extract_roi_embeddings(
-                            student_outputs, boxes_per_image=id_boxes, image_size=image_size,
-                        )
-                id_logits = self._student().classify_ids(id_embeddings)
-            id_loss = id_supervision_loss(id_logits, id_targets)
+            if self.id_min_visibility == self.embedding_min_visibility:
+                id_embeddings = student_roi  # already from detached features
+            else:
+                id_embeddings = self._student().extract_roi_embeddings(
+                    {"features": detached_features},
+                    boxes_per_image=id_boxes,
+                    image_size=image_size,
+                )
+            id_logits = self._student().classify_ids(id_embeddings)
+            id_loss = id_supervision_loss(
+                id_logits, id_targets, label_smoothing=self.id_label_smoothing
+            )
 
             # Also supervise the teacher projector with ID loss (makes it discriminative)
             if tea_proj is not None and self.teacher_id_classifier is not None and teacher_roi.shape[0] > 0:
                 tea_id_logits = self.teacher_id_classifier(teacher_roi)
-                tea_id_loss = id_supervision_loss(tea_id_logits, id_targets[:teacher_roi.shape[0]])
+                tea_id_loss = id_supervision_loss(
+                    tea_id_logits,
+                    id_targets[:teacher_roi.shape[0]],
+                    label_smoothing=self.id_label_smoothing,
+                )
                 id_loss = id_loss + tea_id_loss
         else:
             id_loss = student_roi.sum() * 0.0
@@ -368,22 +426,11 @@ class DistillationTrainer:
             teacher_outputs = self._compute_teacher_outputs(
                 images, batch.get("teacher_cache_paths", [])
             )
-            image_size = tuple(targets[0]["image_size"].tolist())
-            phase_weights = self.phase_schedule.for_epoch(epoch)
-            emb_boxes, _ = _select_supervision_boxes(targets, self.embedding_min_visibility)
-            id_boxes = None
-            if phase_weights["id"] > 0.0:
-                id_boxes, _ = _select_supervision_boxes(targets, self.id_min_visibility)
-                if self.id_min_visibility == self.embedding_min_visibility:
-                    id_boxes = emb_boxes
 
             with torch.amp.autocast(device_type=self.device.type, enabled=self.scaler.is_enabled()):
-                student_outputs = self.student_model(
-                    images,
-                    roi_boxes_per_image=emb_boxes,
-                    roi_image_size=image_size,
-                    id_boxes_per_image=id_boxes,
-                )
+                # Run detection-only forward pass. Embeddings are computed inside
+                # _compute_total_loss from detached FPN features to isolate gradient paths.
+                student_outputs = self.student_model(images)
                 total_loss, log_items = self._compute_total_loss(
                     student_outputs, teacher_outputs, targets, epoch
                 )
@@ -425,20 +472,8 @@ class DistillationTrainer:
             teacher_outputs = self._compute_teacher_outputs(
                 images, batch.get("teacher_cache_paths", [])
             )
-            image_size = tuple(targets[0]["image_size"].tolist())
-            phase_weights = self.phase_schedule.for_epoch(epoch)
-            emb_boxes, _ = _select_supervision_boxes(targets, self.embedding_min_visibility)
-            id_boxes = None
-            if phase_weights["id"] > 0.0:
-                id_boxes, _ = _select_supervision_boxes(targets, self.id_min_visibility)
-                if self.id_min_visibility == self.embedding_min_visibility:
-                    id_boxes = emb_boxes
-            student_outputs = self.student_model(
-                images,
-                roi_boxes_per_image=emb_boxes,
-                roi_image_size=image_size,
-                id_boxes_per_image=id_boxes,
-            )
+            # Detection-only forward pass; embeddings computed in _compute_total_loss.
+            student_outputs = self.student_model(images)
             _, log_items = self._compute_total_loss(
                 student_outputs, teacher_outputs, targets, epoch
             )
@@ -489,9 +524,22 @@ class DistillationTrainer:
                 "val_metrics": val_metrics,
             }
             save_checkpoint(checkpoint, self.output_dir, "last.pt")
-            if val_metrics["loss"] < self.best_val:
-                self.best_val = val_metrics["loss"]
+
+            # Save periodic checkpoint every checkpoint_interval epochs.
+            if self.checkpoint_interval > 0 and epoch % self.checkpoint_interval == 0:
+                save_checkpoint(checkpoint, self.output_dir, f"epoch_{epoch:03d}.pt")
+
+            # best.pt is selected by val detection loss (not total val loss).
+            # Total val loss is dominated by cls_kd and id_loss which are not
+            # aligned with mAP and cause best.pt to be saved before phase-2 starts.
+            if val_metrics["det"] < self.best_val_det:
+                self.best_val_det = val_metrics["det"]
                 save_checkpoint(checkpoint, self.output_dir, "best.pt")
+                if self.logger:
+                    self.logger.info(
+                        "New best checkpoint at epoch %d (val_det=%.4f)",
+                        epoch, val_metrics["det"],
+                    )
 
             (self.output_dir / "history.json").write_text(
                 json.dumps(history, indent=2), encoding="utf-8"

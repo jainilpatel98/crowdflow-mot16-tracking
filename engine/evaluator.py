@@ -101,6 +101,116 @@ def _compute_average_precision(
 
 
 @torch.no_grad()
+def collect_raw_predictions(
+    model,
+    data_loader,
+    device: torch.device,
+    strides: dict[str, int],
+    nms_iou_threshold: float = 0.5,
+) -> tuple[list[dict[str, Any]], dict[int, torch.Tensor], int]:
+    """Run inference once at score_threshold=0 and return all scored candidates.
+
+    Returns:
+        raw_predictions: list of {image_id, score, box} for every surviving box
+            after NMS at ``nms_iou_threshold`` but with score_threshold=0.0
+            (so all boxes above 0 confidence are kept).
+        gt_by_image: {image_id: gt_boxes_xyxy} for mAP computation.
+        gt_count: total number of ground-truth boxes.
+
+    This is the backbone of the threshold sweep: the model runs exactly once,
+    and each threshold is evaluated analytically by filtering ``raw_predictions``.
+    """
+    from engine.inference import decode_student_outputs
+    model.eval()
+    raw_predictions: list[dict[str, Any]] = []
+    gt_by_image: dict[int, torch.Tensor] = {}
+    gt_count = 0
+    image_id = 0
+
+    for batch in tqdm(data_loader, desc="Collecting predictions", leave=False):
+        images = batch["images"].to(device, non_blocking=True)
+        outputs = model(images)
+        # Use a very low threshold so we collect nearly all candidate boxes.
+        # NMS still runs to de-duplicate; only the score filter is relaxed.
+        detections = decode_student_outputs(
+            outputs,
+            strides=strides,
+            score_threshold=0.0,
+            nms_iou_threshold=nms_iou_threshold,
+        )
+        for dets, target in zip(detections, batch["targets"]):
+            gt_boxes = target["boxes"].cpu()
+            gt_by_image[image_id] = gt_boxes
+            gt_count += gt_boxes.shape[0]
+            for det in dets:
+                raw_predictions.append({
+                    "image_id": image_id,
+                    "score": float(det["score"]),
+                    "box": det["bbox_xyxy"].cpu().float(),
+                })
+            image_id += 1
+
+    return raw_predictions, gt_by_image, gt_count
+
+
+def compute_metrics_at_threshold(
+    raw_predictions: list[dict[str, Any]],
+    gt_by_image: dict[int, torch.Tensor],
+    gt_count: int,
+    score_threshold: float,
+) -> "DetectionMetricSummary":
+    """Compute detection metrics from pre-collected raw predictions at a given threshold.
+
+    Filters ``raw_predictions`` by ``score_threshold`` and recomputes all
+    metrics analytically — no model inference required.
+    """
+    filtered = [p for p in raw_predictions if p["score"] >= score_threshold]
+
+    tp_total = fp_total = fn_total = 0
+    matched_ious_list: list[float] = []
+    pred_count = len(filtered)
+
+    # Build per-image prediction boxes for precision/recall/IoU
+    preds_by_image: dict[int, list[dict[str, Any]]] = {}
+    for p in filtered:
+        preds_by_image.setdefault(p["image_id"], []).append(p)
+
+    all_image_ids = set(gt_by_image.keys()) | set(preds_by_image.keys())
+    for img_id in all_image_ids:
+        img_preds = preds_by_image.get(img_id, [])
+        gt_boxes = gt_by_image.get(img_id, torch.zeros((0, 4)))
+        pred_boxes = (
+            torch.stack([p["box"] for p in img_preds], dim=0)
+            if img_preds else torch.zeros((0, 4))
+        )
+        tp, fp, fn, ious = _match_detections(pred_boxes, gt_boxes)
+        tp_total += tp
+        fp_total += fp
+        fn_total += fn
+        matched_ious_list.extend(ious)
+
+    precision = tp_total / max(1, tp_total + fp_total)
+    recall = tp_total / max(1, tp_total + fn_total)
+    mean_iou = sum(matched_ious_list) / max(1, len(matched_ious_list))
+
+    ap_thresholds = [0.5 + 0.05 * i for i in range(10)]
+    ap_values = [
+        _compute_average_precision(filtered, gt_by_image, gt_count, t)
+        for t in ap_thresholds
+    ]
+    return DetectionMetricSummary(
+        precision=precision,
+        recall=recall,
+        mean_iou=mean_iou,
+        map50=ap_values[0],
+        map50_95=sum(ap_values) / len(ap_values),
+        num_predictions=pred_count,
+        num_targets=gt_count,
+    )
+
+
+
+@torch.no_grad()
 def evaluate_detection(
     model,
     data_loader,

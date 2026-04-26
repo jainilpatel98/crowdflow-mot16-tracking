@@ -231,6 +231,10 @@ def main() -> int:
         center_radius=float(config["assigner"]["center_radius"]),
     )
 
+    # Support both new per-loss ramp format (loss_schedule dict) and legacy
+    # fixed-phase format (phases list).  The trainer auto-detects via isinstance.
+    schedule_config = config.get("loss_schedule") or config["phases"]
+
     # ------------------------------------------------------------------
     # Trainer
     # ------------------------------------------------------------------
@@ -244,7 +248,7 @@ def main() -> int:
         optimizer=optimizer,
         scheduler=scheduler,
         device=device,
-        phases=config["phases"],
+        phases=schedule_config,
         output_dir=output_dir,
         amp=config["training"].get("amp", True),
         grad_clip=float(config["training"].get("grad_clip", 1.0)),
@@ -252,6 +256,8 @@ def main() -> int:
         use_teacher_cache=use_cache,
         embedding_min_visibility=float(dataset_cfg["dataset"].get("embedding_visibility_threshold", 0.25)),
         id_min_visibility=float(dataset_cfg["dataset"].get("id_visibility_threshold", 0.25)),
+        id_label_smoothing=float(config["training"].get("id_label_smoothing", 0.0)),
+        checkpoint_interval=int(config["training"].get("checkpoint_interval", 5)),
         logger=logger,
     )
 

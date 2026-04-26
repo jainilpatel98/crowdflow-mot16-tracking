@@ -57,6 +57,8 @@ training:
   log_interval: 20
   output_dir: runs/student_distill
   temperature: 2.0
+  id_label_smoothing: 0.1
+  checkpoint_interval: 5
 
 phases:
   - start_epoch: 1
