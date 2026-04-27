@@ -50,32 +50,11 @@ class StudentJDE(nn.Module):
     def forward(
         self,
         images: torch.Tensor,
-        roi_boxes_per_image: Iterable[torch.Tensor] | None = None,
-        roi_image_size: tuple[int, int] | None = None,
-        id_boxes_per_image: Iterable[torch.Tensor] | None = None,
     ) -> dict[str, dict[str, torch.Tensor] | torch.Tensor]:
         backbone_features = self.backbone(images)
         pyramid_features = self.neck(backbone_features)
         predictions = self.head(pyramid_features)
         predictions["features"] = pyramid_features
-        if roi_boxes_per_image is not None and roi_image_size is not None:
-            predictions["roi_embeddings"] = self.extract_roi_embeddings(
-                predictions,
-                boxes_per_image=roi_boxes_per_image,
-                image_size=roi_image_size,
-            )
-        if id_boxes_per_image is not None and roi_image_size is not None:
-            if roi_boxes_per_image is id_boxes_per_image and "roi_embeddings" in predictions:
-                id_embeddings = predictions["roi_embeddings"]
-            else:
-                id_embeddings = self.extract_roi_embeddings(
-                    predictions,
-                    boxes_per_image=id_boxes_per_image,
-                    image_size=roi_image_size,
-                )
-            predictions["id_embeddings"] = id_embeddings
-            if self.id_classifier is not None:
-                predictions["id_logits"] = self.id_classifier(id_embeddings)
         return predictions
 
     def extract_roi_embeddings(

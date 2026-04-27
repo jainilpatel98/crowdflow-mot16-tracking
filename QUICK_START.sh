@@ -146,18 +146,36 @@ do_train_cache() {
 }
 
 do_eval() {
-    _header "Evaluate Detection on MOT16 Val Sequences"
-    # ─── COMMAND ───────────────────────────────────────────────────────────
-    #   python tools/eval_detection.py \
-    #       --config configs/student_distill_resnet50.yaml \
-    #       --checkpoint runs/student_distill_resnet50/best.pt
-    # ───────────────────────────────────────────────────────────────────────
-    local ckpt="${1:-runs/student_distill_resnet50/best.pt}"
+    local model_target="${1:-}"
     cd "$ROOT"
-    _cmd "python tools/eval_detection.py --config configs/student_distill_resnet50.yaml --checkpoint $ckpt"
-    "$PYTHON" tools/eval_detection.py \
-        --config configs/student_distill_resnet50.yaml \
-        --checkpoint "$ckpt"
+    if [ "$model_target" = "teacher" ]; then
+        local teacher_ckpt="${2:-}"
+        _header "Evaluate Teacher Detection on MOT16 Val Sequences"
+        if [ -n "$teacher_ckpt" ]; then
+            _cmd "python tools/eval_detection.py --config configs/student_distill_resnet50.yaml --model-type teacher --checkpoint $teacher_ckpt"
+            "$PYTHON" tools/eval_detection.py \
+                --config configs/student_distill_resnet50.yaml \
+                --model-type teacher \
+                --checkpoint "$teacher_ckpt"
+        else
+            _cmd "python tools/eval_detection.py --config configs/student_distill_resnet50.yaml --model-type teacher"
+            "$PYTHON" tools/eval_detection.py \
+                --config configs/student_distill_resnet50.yaml \
+                --model-type teacher
+        fi
+    else
+        # ─── COMMAND ───────────────────────────────────────────────────────
+        #   python tools/eval_detection.py \
+        #       --config configs/student_distill_resnet50.yaml \
+        #       --checkpoint runs/student_distill_resnet50/best.pt
+        # ───────────────────────────────────────────────────────────────────
+        local ckpt="${1:-runs/student_distill_resnet50/best.pt}"
+        _header "Evaluate Detection on MOT16 Val Sequences"
+        _cmd "python tools/eval_detection.py --config configs/student_distill_resnet50.yaml --checkpoint $ckpt"
+        "$PYTHON" tools/eval_detection.py \
+            --config configs/student_distill_resnet50.yaml \
+            --checkpoint "$ckpt"
+    fi
 }
 
 do_track() {
@@ -264,6 +282,13 @@ do_help() {
         --config configs/student_distill_resnet50.yaml \
         --checkpoint runs/student_distill_resnet50/best.pt
 
+  Teacher detection metrics:
+    ./QUICK_START.sh eval teacher
+    # or:
+    python tools/eval_detection.py \
+        --config configs/student_distill_resnet50.yaml \
+        --model-type teacher
+
   Tracking on a single sequence (MOT format output):
     ./QUICK_START.sh track MOT16/train/MOT16-10
     # or:
@@ -336,7 +361,7 @@ case "${1:-help}" in
     smoke)        do_smoke ;;
     cache)        do_cache ;;
     train-cache)  do_train_cache ;;
-    eval)         do_eval "${2:-}" ;;
+    eval)         do_eval "${2:-}" "${3:-}" ;;
     track)        do_track "${2:-}" "${3:-}" ;;
     monitor)      do_monitor ;;
     export)       do_export ;;

@@ -98,8 +98,8 @@ class TeacherWrapper(nn.Module):
         emb_dim: int = 128,
     ) -> None:
         super().__init__()
-        self.yolo = YOLO(ckpt_path)
-        self.model = self.yolo.model.to(device)
+        yolo = YOLO(ckpt_path)
+        self.model = yolo.model.to(device)
         self.model.eval()
         for parameter in self.model.parameters():
             parameter.requires_grad = False

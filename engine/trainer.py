@@ -149,6 +149,29 @@ def _load_teacher_cache_batch(
     return batch
 
 
+def _select_cached_roi_embeddings(
+    teacher_outputs: dict[str, Any],
+    min_visibility: float,
+    device: torch.device,
+    emb_dim: int,
+) -> torch.Tensor:
+    roi_embeddings = teacher_outputs.get("roi_embeddings_per_image")
+    if not roi_embeddings:
+        return torch.zeros((0, emb_dim), device=device)
+
+    vis_lists = teacher_outputs.get("visibilities_per_image")
+    selected = []
+    for index, embs in enumerate(roi_embeddings):
+        embs = embs.to(device)
+        if vis_lists is not None:
+            vis = vis_lists[index].to(device)
+            embs = embs[vis >= min_visibility]
+        selected.append(embs)
+    if not selected:
+        return torch.zeros((0, emb_dim), device=device)
+    return torch.cat(selected, dim=0)
+
+
 # ---------------------------------------------------------------------------
 # Trainer
 # ---------------------------------------------------------------------------
@@ -310,19 +333,11 @@ class DistillationTrainer:
         # Teacher embedding: use trainable projector on p3 (live or cached)
         tea_proj = self._tea_proj()
         if "roi_embeddings_per_image" in teacher_outputs and tea_proj is None:
-            # Legacy cache path: cached embeddings available
-            vis_lists = teacher_outputs.get("visibilities_per_image")
-            teacher_roi_list = []
-            for i, embs in enumerate(teacher_outputs["roi_embeddings_per_image"]):
-                embs = embs.to(self.device)
-                if vis_lists is not None:
-                    vis = vis_lists[i].to(self.device)
-                    embs = embs[vis >= self.embedding_min_visibility]
-                teacher_roi_list.append(embs)
-            teacher_roi = (
-                torch.cat(teacher_roi_list, dim=0)
-                if teacher_roi_list
-                else student_roi.new_zeros((0, student_roi.shape[-1]))
+            teacher_roi = _select_cached_roi_embeddings(
+                teacher_outputs,
+                min_visibility=self.embedding_min_visibility,
+                device=self.device,
+                emb_dim=student_roi.shape[-1],
             )
         elif tea_proj is not None:
             teacher_roi = tea_proj.extract_embeddings(
@@ -353,11 +368,32 @@ class DistillationTrainer:
             )
 
             # Also supervise the teacher projector with ID loss (makes it discriminative)
-            if tea_proj is not None and self.teacher_id_classifier is not None and teacher_roi.shape[0] > 0:
-                tea_id_logits = self.teacher_id_classifier(teacher_roi)
+            if self.id_min_visibility == self.embedding_min_visibility:
+                teacher_id_embeddings = teacher_roi
+            elif "roi_embeddings_per_image" in teacher_outputs and tea_proj is None:
+                teacher_id_embeddings = _select_cached_roi_embeddings(
+                    teacher_outputs,
+                    min_visibility=self.id_min_visibility,
+                    device=self.device,
+                    emb_dim=student_roi.shape[-1],
+                )
+            elif tea_proj is not None:
+                teacher_id_embeddings = tea_proj.extract_embeddings(
+                    teacher_outputs["spatial_feat"],
+                    boxes_per_image=id_boxes,
+                    image_size=image_size,
+                )
+            else:
+                teacher_id_embeddings = student_roi.new_zeros((0, student_roi.shape[-1]))
+
+            if (
+                self.teacher_id_classifier is not None
+                and teacher_id_embeddings.shape[0] > 0
+            ):
+                tea_id_logits = self.teacher_id_classifier(teacher_id_embeddings)
                 tea_id_loss = id_supervision_loss(
                     tea_id_logits,
-                    id_targets[:teacher_roi.shape[0]],
+                    id_targets[:teacher_id_embeddings.shape[0]],
                     label_smoothing=self.id_label_smoothing,
                 )
                 id_loss = id_loss + tea_id_loss
