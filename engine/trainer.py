@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+from torchvision.ops import roi_align
 try:
     from tqdm import tqdm
 except ImportError:  # pragma: no cover
@@ -172,6 +173,28 @@ def _select_cached_roi_embeddings(
     return torch.cat(selected, dim=0)
 
 
+def _pool_roi_features(
+    feature_map: torch.Tensor,
+    boxes_per_image: list[torch.Tensor],
+    image_size: tuple[int, int],
+    output_size: tuple[int, int] = (7, 7),
+) -> torch.Tensor:
+    image_h, image_w = image_size
+    scale = feature_map.shape[-1] / float(image_w)
+    rois = []
+    for batch_index, boxes in enumerate(boxes_per_image):
+        if boxes.numel() == 0:
+            continue
+        batch_column = torch.full((boxes.shape[0], 1), batch_index, device=boxes.device, dtype=boxes.dtype)
+        rois.append(torch.cat((batch_column, boxes), dim=1))
+    if not rois:
+        channels = feature_map.shape[1]
+        out_h, out_w = output_size
+        return feature_map.new_zeros((0, channels, out_h, out_w))
+    rois_tensor = torch.cat(rois, dim=0)
+    return roi_align(feature_map, rois_tensor, output_size=output_size, spatial_scale=scale, aligned=True)
+
+
 # ---------------------------------------------------------------------------
 # Trainer
 # ---------------------------------------------------------------------------
@@ -313,7 +336,7 @@ class DistillationTrainer:
         feat_kd = feature_distill_loss(
             student_outputs["features"],
             teacher_outputs["features"],
-            adapters=self._adapters(),
+            adapters=self.feature_adapters,
         )
 
         # --- Embedding KD and ID loss (student ROI ↔ teacher ROI projector) ---
@@ -323,27 +346,26 @@ class DistillationTrainer:
         # Only the ROI projector and id_classifier are trained by these losses.
         image_size = tuple(targets[0]["image_size"].tolist())
         emb_boxes, _ = _select_supervision_boxes(targets, self.embedding_min_visibility)
-        detached_features = {k: v.detach() for k, v in student_outputs["features"].items()}
-        student_roi = self._student().extract_roi_embeddings(
-            {"features": detached_features},
-            boxes_per_image=emb_boxes,
-            image_size=image_size,
-        )
+        student_roi = student_outputs["roi_embeddings"]
 
         # Teacher embedding: use trainable projector on p3 (live or cached)
-        tea_proj = self._tea_proj()
-        if "roi_embeddings_per_image" in teacher_outputs and tea_proj is None:
+        if "roi_embeddings_per_image" in teacher_outputs and self.teacher_roi_projector is None:
             teacher_roi = _select_cached_roi_embeddings(
                 teacher_outputs,
                 min_visibility=self.embedding_min_visibility,
                 device=self.device,
                 emb_dim=student_roi.shape[-1],
             )
-        elif tea_proj is not None:
-            teacher_roi = tea_proj.extract_embeddings(
+        elif self.teacher_roi_projector is not None:
+            pooled_teacher_roi = _pool_roi_features(
                 teacher_outputs["spatial_feat"],
                 boxes_per_image=emb_boxes,
                 image_size=image_size,
+            )
+            teacher_roi = (
+                self.teacher_roi_projector(pooled_teacher_roi)
+                if pooled_teacher_roi.shape[0] > 0
+                else student_roi.new_zeros((0, student_roi.shape[-1]))
             )
         else:
             teacher_roi = student_roi.new_zeros((0, student_roi.shape[-1]))
@@ -351,18 +373,9 @@ class DistillationTrainer:
         emb_kd = embedding_cosine_loss(student_roi, teacher_roi)
 
         # --- ID loss (student, with label smoothing) ---
-        # id_embeddings also come from detached FPN features (via student_roi above).
         id_boxes, id_targets = _select_supervision_boxes(targets, self.id_min_visibility)
         if weights["id"] > 0.0 and id_targets.numel() > 0:
-            if self.id_min_visibility == self.embedding_min_visibility:
-                id_embeddings = student_roi  # already from detached features
-            else:
-                id_embeddings = self._student().extract_roi_embeddings(
-                    {"features": detached_features},
-                    boxes_per_image=id_boxes,
-                    image_size=image_size,
-                )
-            id_logits = self._student().classify_ids(id_embeddings)
+            id_logits = student_outputs.get("id_logits")
             id_loss = id_supervision_loss(
                 id_logits, id_targets, label_smoothing=self.id_label_smoothing
             )
@@ -370,18 +383,23 @@ class DistillationTrainer:
             # Also supervise the teacher projector with ID loss (makes it discriminative)
             if self.id_min_visibility == self.embedding_min_visibility:
                 teacher_id_embeddings = teacher_roi
-            elif "roi_embeddings_per_image" in teacher_outputs and tea_proj is None:
+            elif "roi_embeddings_per_image" in teacher_outputs and self.teacher_roi_projector is None:
                 teacher_id_embeddings = _select_cached_roi_embeddings(
                     teacher_outputs,
                     min_visibility=self.id_min_visibility,
                     device=self.device,
                     emb_dim=student_roi.shape[-1],
                 )
-            elif tea_proj is not None:
-                teacher_id_embeddings = tea_proj.extract_embeddings(
+            elif self.teacher_roi_projector is not None:
+                pooled_teacher_id = _pool_roi_features(
                     teacher_outputs["spatial_feat"],
                     boxes_per_image=id_boxes,
                     image_size=image_size,
+                )
+                teacher_id_embeddings = (
+                    self.teacher_roi_projector(pooled_teacher_id)
+                    if pooled_teacher_id.shape[0] > 0
+                    else student_roi.new_zeros((0, student_roi.shape[-1]))
                 )
             else:
                 teacher_id_embeddings = student_roi.new_zeros((0, student_roi.shape[-1]))
@@ -462,11 +480,21 @@ class DistillationTrainer:
             teacher_outputs = self._compute_teacher_outputs(
                 images, batch.get("teacher_cache_paths", [])
             )
+            image_size = tuple(targets[0]["image_size"].tolist())
+            emb_boxes, _ = _select_supervision_boxes(targets, self.embedding_min_visibility)
+            if self.id_min_visibility == self.embedding_min_visibility:
+                id_boxes = emb_boxes
+            else:
+                id_boxes, _ = _select_supervision_boxes(targets, self.id_min_visibility)
 
             with torch.amp.autocast(device_type=self.device.type, enabled=self.scaler.is_enabled()):
-                # Run detection-only forward pass. Embeddings are computed inside
-                # _compute_total_loss from detached FPN features to isolate gradient paths.
-                student_outputs = self.student_model(images)
+                student_outputs = self.student_model(
+                    images,
+                    roi_boxes_per_image=emb_boxes,
+                    roi_image_size=image_size,
+                    id_boxes_per_image=id_boxes,
+                    detach_features_for_roi=True,
+                )
                 total_loss, log_items = self._compute_total_loss(
                     student_outputs, teacher_outputs, targets, epoch
                 )
@@ -508,8 +536,19 @@ class DistillationTrainer:
             teacher_outputs = self._compute_teacher_outputs(
                 images, batch.get("teacher_cache_paths", [])
             )
-            # Detection-only forward pass; embeddings computed in _compute_total_loss.
-            student_outputs = self.student_model(images)
+            image_size = tuple(targets[0]["image_size"].tolist())
+            emb_boxes, _ = _select_supervision_boxes(targets, self.embedding_min_visibility)
+            if self.id_min_visibility == self.embedding_min_visibility:
+                id_boxes = emb_boxes
+            else:
+                id_boxes, _ = _select_supervision_boxes(targets, self.id_min_visibility)
+            student_outputs = self.student_model(
+                images,
+                roi_boxes_per_image=emb_boxes,
+                roi_image_size=image_size,
+                id_boxes_per_image=id_boxes,
+                detach_features_for_roi=True,
+            )
             _, log_items = self._compute_total_loss(
                 student_outputs, teacher_outputs, targets, epoch
             )
