@@ -284,6 +284,10 @@ def main() -> int:
         freeze_backbone_stages=config["student"].get("freeze_backbone_stages"),
         freeze_backbone_stages_until_epoch=int(config["student"].get("freeze_backbone_stages_until_epoch", 0)),
         backbone_bn_eval=bool(config["student"].get("backbone_bn_eval", False)),
+        # mAP@0.5 checkpoint selection — pass strides and inference thresholds
+        strides={lv: int(v) for lv, v in config["assigner"]["strides"].items()},
+        score_threshold=float(config["inference"].get("score_threshold", 0.1)),
+        nms_iou_threshold=float(config["inference"].get("nms_iou_threshold", 0.5)),
         logger=logger,
     )
 

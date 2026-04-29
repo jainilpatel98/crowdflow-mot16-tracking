@@ -84,6 +84,7 @@ htmlcov/
 # Local Testing
 test_output/
 test_results/
+debugging/
 
 # Weights & Checkpoints (besides committed ones if any)
 weights/

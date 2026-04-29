@@ -17,6 +17,7 @@ from engine.hooks import save_checkpoint
 from losses.det_loss import detection_loss
 from losses.id_loss import id_supervision_loss
 from losses.kd_loss import box_kd_loss, classification_kd_loss, embedding_cosine_loss, feature_distill_loss
+from engine.evaluator import evaluate_detection
 from utils.distributed import is_main_process, reduce_scalar
 from utils.logger import SmoothedValue
 
@@ -240,6 +241,9 @@ class DistillationTrainer:
         freeze_backbone_stages: list[str] | tuple[str, ...] | None = None,
         freeze_backbone_stages_until_epoch: int = 0,
         backbone_bn_eval: bool = False,
+        strides: dict[str, int] | None = None,
+        score_threshold: float = 0.1,
+        nms_iou_threshold: float = 0.5,
         logger=None,
     ) -> None:
         self.student_model = student_model
@@ -269,9 +273,13 @@ class DistillationTrainer:
             self.phase_schedule = LossRampSchedule(phases)
         else:
             self.phase_schedule = PhaseWeightSchedule(phases)
-        # best.pt is saved based on val det loss (not total val loss which includes
-        # cls_kd and id_loss and is unreliable across phase transitions).
-        self.best_val_det = float("inf")
+        # best.pt is selected by inline mAP@0.5 (threshold-independent quality metric
+        # that captures the full P-R curve; superior to val_det loss which rises after
+        # backbone unfreeze even as detection quality improves).
+        self.best_val_map50 = 0.0
+        self.strides = dict(strides) if strides is not None else {}
+        self.score_threshold = float(score_threshold)
+        self.nms_iou_threshold = float(nms_iou_threshold)
         self.embedding_min_visibility = embedding_min_visibility
         self.id_min_visibility = id_min_visibility
         self._backbone_stages_frozen = False
@@ -651,16 +659,36 @@ class DistillationTrainer:
             if self.checkpoint_interval > 0 and epoch % self.checkpoint_interval == 0:
                 save_checkpoint(checkpoint, self.output_dir, f"epoch_{epoch:03d}.pt")
 
-            # best.pt is selected by val detection loss (not total val loss).
-            # Total val loss is dominated by cls_kd and id_loss which are not
-            # aligned with mAP and cause best.pt to be saved before phase-2 starts.
-            if val_metrics["det"] < self.best_val_det:
-                self.best_val_det = val_metrics["det"]
+            # best.pt is selected by inline mAP@0.5 evaluation.
+            # Falls back to -val_det (higher=better) if strides were not provided.
+            if self.strides:
+                _summary = evaluate_detection(
+                    self.student_model,
+                    val_loader,
+                    self.device,
+                    strides=self.strides,
+                    score_threshold=self.score_threshold,
+                    nms_iou_threshold=self.nms_iou_threshold,
+                )
+                current_map50 = _summary.map50
+                if self.logger:
+                    self.logger.info(
+                        "Epoch %d  mAP@0.5=%.4f  Prec=%.4f  Rec=%.4f  F1=%.4f",
+                        epoch, current_map50,
+                        _summary.precision, _summary.recall, _summary.f1,
+                    )
+            else:
+                # Legacy fallback: no strides provided
+                current_map50 = -val_metrics["det"]
+                if self.best_val_map50 == 0.0:
+                    self.best_val_map50 = current_map50 - 1.0  # ensure first epoch saves
+            if current_map50 > self.best_val_map50:
+                self.best_val_map50 = current_map50
                 save_checkpoint(checkpoint, self.output_dir, "best.pt")
                 if self.logger:
                     self.logger.info(
-                        "New best checkpoint at epoch %d (val_det=%.4f)",
-                        epoch, val_metrics["det"],
+                        "New best checkpoint at epoch %d (mAP@0.5=%.4f)",
+                        epoch, current_map50,
                     )
 
             (self.output_dir / "history.json").write_text(

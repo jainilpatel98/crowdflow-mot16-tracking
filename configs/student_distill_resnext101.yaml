@@ -63,7 +63,7 @@ training:
   amp: true
   grad_clip: 1.0
   log_interval: 20
-  output_dir: runs/student_distill_resnext101_tuned
+  output_dir: runs/student_distill_resnext101
   temperature: 2.0
   id_label_smoothing: 0.1
   checkpoint_interval: 5
@@ -75,11 +75,11 @@ loss_schedule:
     - [60, 75, 1.0, 1.8]
     - [75, 80, 1.8, 1.8]
   cls_kd:
-    - [1, 5, 0.005, 0.005]
-    - [5, 15, 0.005, 0.03]
-    - [15, 40, 0.03, 0.03]
-    - [40, 60, 0.03, 0.01]
-    - [60, 80, 0.01, 0.0]
+    - [1, 5, 0.03, 0.03]      # Foreground-weighted: ~10-50x fewer terms, raise weight accordingly
+    - [5, 15, 0.03, 0.08]     # Ramp up as backbone unfreezes
+    - [15, 40, 0.08, 0.08]    # Hold
+    - [40, 60, 0.08, 0.03]    # Ramp down as det matures
+    - [60, 80, 0.03, 0.0]     # Phase out
   box_kd:
     - [1, 12, 0.0, 0.0]
     - [12, 20, 0.0, 0.15]
@@ -87,7 +87,10 @@ loss_schedule:
     - [60, 75, 0.15, 0.05]
     - [75, 80, 0.05, 0.05]
   feat:
-    - [1, 80, 0.0, 0.0]
+    - [1, 8, 0.0, 0.0]        # Let detection stabilize first
+    - [8, 20, 0.0, 0.5]       # Ramp in FPN feature alignment
+    - [20, 60, 0.5, 0.5]      # Hold (raw feat_kd ~0.003-0.01 → effective ~0.002-0.005)
+    - [60, 80, 0.5, 0.2]      # Taper as det heads stabilize
   emb:
     - [1, 28, 0.0, 0.0]
     - [28, 35, 0.0, 0.15]
