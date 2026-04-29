@@ -12,3 +12,10 @@ class DetectionMetricSummary:
     map50_95: float
     num_predictions: int
     num_targets: int
+
+    @property
+    def f1(self) -> float:
+        denom = self.precision + self.recall
+        if denom <= 0.0:
+            return 0.0
+        return 2.0 * self.precision * self.recall / denom

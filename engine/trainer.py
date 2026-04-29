@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+from torch import nn
 from torchvision.ops import roi_align
 try:
     from tqdm import tqdm
@@ -236,6 +237,9 @@ class DistillationTrainer:
         id_min_visibility: float = 0.25,
         id_label_smoothing: float = 0.0,
         checkpoint_interval: int = 5,
+        freeze_backbone_stages: list[str] | tuple[str, ...] | None = None,
+        freeze_backbone_stages_until_epoch: int = 0,
+        backbone_bn_eval: bool = False,
         logger=None,
     ) -> None:
         self.student_model = student_model
@@ -255,6 +259,9 @@ class DistillationTrainer:
         self.use_teacher_cache = use_teacher_cache
         self.id_label_smoothing = id_label_smoothing
         self.checkpoint_interval = checkpoint_interval
+        self.freeze_backbone_stages = tuple(freeze_backbone_stages or ())
+        self.freeze_backbone_stages_until_epoch = int(freeze_backbone_stages_until_epoch)
+        self.backbone_bn_eval = bool(backbone_bn_eval)
         self.logger = logger
         self.scaler = torch.amp.GradScaler("cuda", enabled=amp and device.type == "cuda")
         # Auto-detect schedule format: dict → LossRampSchedule, list → PhaseWeightSchedule
@@ -267,6 +274,7 @@ class DistillationTrainer:
         self.best_val_det = float("inf")
         self.embedding_min_visibility = embedding_min_visibility
         self.id_min_visibility = id_min_visibility
+        self._backbone_stages_frozen = False
 
     # ------------------------------------------------------------------
     # Module accessors (handles DDP wrapping)
@@ -283,6 +291,41 @@ class DistillationTrainer:
 
     def _tea_proj(self):
         return self._unwrap(self.teacher_roi_projector) if self.teacher_roi_projector is not None else None
+
+    def _student_backbone(self):
+        return self._student().backbone
+
+    def _set_module_trainable(self, module: nn.Module, trainable: bool) -> None:
+        for param in module.parameters():
+            param.requires_grad = trainable
+
+    def _configure_backbone_for_epoch(self, epoch: int) -> None:
+        if not self.freeze_backbone_stages:
+            return
+        should_freeze = epoch <= self.freeze_backbone_stages_until_epoch
+        if should_freeze == self._backbone_stages_frozen:
+            return
+        backbone = self._student_backbone()
+        for stage_name in self.freeze_backbone_stages:
+            stage = getattr(backbone, stage_name, None)
+            if stage is None:
+                raise ValueError(f"Student backbone has no stage named '{stage_name}'")
+            self._set_module_trainable(stage, not should_freeze)
+        self._backbone_stages_frozen = should_freeze
+        if self.logger is not None and is_main_process():
+            action = "Froze" if should_freeze else "Unfroze"
+            self.logger.info(
+                "%s student backbone stages %s",
+                action,
+                ", ".join(self.freeze_backbone_stages),
+            )
+
+    def _set_backbone_bn_eval(self) -> None:
+        if not self.backbone_bn_eval:
+            return
+        for module in self._student_backbone().modules():
+            if isinstance(module, (nn.BatchNorm1d, nn.BatchNorm2d, nn.SyncBatchNorm)):
+                module.eval()
 
     # ------------------------------------------------------------------
     # Teacher outputs
@@ -451,6 +494,7 @@ class DistillationTrainer:
 
     def _set_train(self) -> None:
         self.student_model.train()
+        self._set_backbone_bn_eval()
         if self.feature_adapters is not None:
             self.feature_adapters.train()
         if self.teacher_roi_projector is not None:
@@ -563,6 +607,9 @@ class DistillationTrainer:
     def fit(self, train_loader, val_loader, epochs: int) -> None:
         history = []
         for epoch in range(1, epochs + 1):
+            self._configure_backbone_for_epoch(epoch)
+            if self.logger is not None and is_main_process():
+                self.logger.info("Epoch %d loss_weights=%s", epoch, self.phase_schedule.for_epoch(epoch))
             if hasattr(train_loader, "sampler") and hasattr(train_loader.sampler, "set_epoch"):
                 train_loader.sampler.set_epoch(epoch)
             if hasattr(val_loader, "sampler") and hasattr(val_loader.sampler, "set_epoch"):

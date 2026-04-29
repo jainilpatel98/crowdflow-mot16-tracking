@@ -1,0 +1,106 @@
+seed: 1337
+
+dataset:
+  config: configs/dataset_mot16.yaml
+  batch_size: 12
+
+teacher:
+  ckpt_path: code/yolo26x.pt
+  device: cuda
+  person_class: 0
+  freeze: true
+  feature_channels:
+    p3: 384
+    p4: 768
+    p5: 768
+  use_cache: false
+  cache_root: data/teacher_cache
+
+student:
+  backbone_name: resnext101_32x8d
+  pretrained_backbone: true
+  fpn_channels: 384
+  emb_dim: 128
+  roi_dropout: 0.5
+  # Large students copy the teacher too quickly on MOT16.
+  # Keep more of the pretrained backbone fixed through the early detection-only stage.
+  freeze_backbone_stages: [stem, layer1, layer2]
+  freeze_backbone_stages_until_epoch: 15
+  backbone_bn_eval: true
+
+assigner:
+  strides:
+    p3: 8
+    p4: 16
+    p5: 32
+  area_ranges:
+    p3: [0, 2304]
+    p4: [2304, 16384]
+    p5: [16384, 1000000000]
+  center_radius: 1.5
+
+sampler:
+  balance_sequences: true
+  replacement: true
+
+optimizer:
+  name: adamw
+  lr_backbone: 0.00001
+  lr_heads: 0.0002
+  lr_neck: 0.0002
+  lr_head: 0.0002
+  lr_aux: 0.0003
+  weight_decay: 0.0003
+  betas: [0.9, 0.999]
+
+scheduler:
+  warmup_epochs: 10
+  min_lr_ratio: 0.05
+
+training:
+  device: cuda
+  epochs: 80
+  amp: true
+  grad_clip: 1.0
+  log_interval: 20
+  output_dir: runs/student_distill_resnext101_tuned
+  temperature: 2.0
+  id_label_smoothing: 0.1
+  checkpoint_interval: 5
+
+loss_schedule:
+  det:
+    - [1, 5, 0.8, 1.0]
+    - [5, 60, 1.0, 1.0]
+    - [60, 75, 1.0, 1.8]
+    - [75, 80, 1.8, 1.8]
+  cls_kd:
+    - [1, 5, 0.005, 0.005]
+    - [5, 15, 0.005, 0.03]
+    - [15, 40, 0.03, 0.03]
+    - [40, 60, 0.03, 0.01]
+    - [60, 80, 0.01, 0.0]
+  box_kd:
+    - [1, 12, 0.0, 0.0]
+    - [12, 20, 0.0, 0.15]
+    - [20, 60, 0.15, 0.15]
+    - [60, 75, 0.15, 0.05]
+    - [75, 80, 0.05, 0.05]
+  feat:
+    - [1, 80, 0.0, 0.0]
+  emb:
+    - [1, 28, 0.0, 0.0]
+    - [28, 35, 0.0, 0.15]
+    - [35, 70, 0.15, 0.15]
+    - [70, 80, 0.15, 0.25]
+  id:
+    - [1, 20, 0.0, 0.0]
+    - [20, 28, 0.0, 0.10]
+    - [28, 60, 0.10, 0.10]
+    - [60, 70, 0.10, 0.03]
+    - [70, 80, 0.03, 0.03]
+
+inference:
+  score_threshold: 0.05
+  nms_iou_threshold: 0.5
+  max_detections: 300

@@ -1,0 +1,104 @@
+seed: 1337
+
+dataset:
+  config: configs/dataset_mot16.yaml
+  batch_size: 12
+
+teacher:
+  ckpt_path: code/yolo26x.pt
+  device: cuda
+  person_class: 0
+  freeze: true
+  feature_channels:
+    p3: 384
+    p4: 768
+    p5: 768
+  use_cache: false
+  cache_root: data/teacher_cache
+
+student:
+  backbone_name: resnext50_32x4d
+  pretrained_backbone: true
+  fpn_channels: 384
+  emb_dim: 128
+  roi_dropout: 0.3
+
+assigner:
+  strides:
+    p3: 8
+    p4: 16
+    p5: 32
+  area_ranges:
+    p3: [0, 2304]
+    p4: [2304, 16384]
+    p5: [16384, 1000000000]
+  center_radius: 1.5
+
+sampler:
+  balance_sequences: true
+  replacement: true
+
+optimizer:
+  name: adamw
+  lr_backbone: 0.0001
+  lr_heads: 0.0005
+  weight_decay: 0.0001
+  betas: [0.9, 0.999]
+
+scheduler:
+  warmup_epochs: 3
+  min_lr_ratio: 0.05
+
+training:
+  device: cuda
+  epochs: 80
+  amp: true
+  grad_clip: 1.0
+  log_interval: 20
+  output_dir: runs/student_distill_resnext50
+  temperature: 2.0
+  id_label_smoothing: 0.1
+  checkpoint_interval: 5
+
+loss_schedule:
+  det:
+    - [1,  3,  0.3, 0.3]
+    - [3,  8,  0.3, 1.0]
+    - [8,  60, 1.0, 1.0]
+    - [60, 75, 1.0, 2.0]
+    - [75, 80, 2.0, 2.0]
+  cls_kd:
+    - [1,  3,  0.03, 0.03]
+    - [3,  15, 0.03, 0.10]
+    - [15, 50, 0.10, 0.10]
+    - [50, 65, 0.10, 0.03]
+    - [65, 80, 0.03, 0.03]
+  box_kd:
+    - [1,  7,  0.0,  0.0]
+    - [7,  12, 0.0,  0.4]
+    - [12, 65, 0.4,  0.4]
+    - [65, 75, 0.4,  0.2]
+    - [75, 80, 0.2,  0.2]
+  feat:
+    - [1,  8,  0.0,  0.0]
+    - [8,  13, 0.0,  5.0]
+    - [13, 40, 5.0,  5.0]
+    - [40, 55, 5.0,  1.0]
+    - [55, 70, 1.0,  1.0]
+    - [70, 80, 1.0,  0.0]
+  emb:
+    - [1,  22, 0.0,  0.0]
+    - [22, 27, 0.0,  0.3]
+    - [27, 70, 0.3,  0.3]
+    - [70, 80, 0.3,  0.5]
+  id:
+    - [1,  15, 0.0,  0.0]
+    - [15, 20, 0.0,  0.2]
+    - [20, 55, 0.2,  0.2]
+    - [55, 70, 0.2,  0.05]
+    - [70, 80, 0.05, 0.05]
+
+inference:
+  score_threshold: 0.05
+  nms_iou_threshold: 0.5
+  max_detections: 300

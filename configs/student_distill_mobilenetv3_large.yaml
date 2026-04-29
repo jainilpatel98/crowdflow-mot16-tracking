@@ -2,7 +2,7 @@ seed: 1337
 
 dataset:
   config: configs/dataset_mot16.yaml
-  batch_size: 14
+  batch_size: 12
 
 teacher:
   ckpt_path: code/yolo26x.pt

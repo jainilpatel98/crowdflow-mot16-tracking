@@ -42,15 +42,17 @@ class OnnxExportWrapper(nn.Module):
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Export the student model to ONNX.")
     parser.add_argument("--config", default="configs/student_distill.yaml")
-    parser.add_argument("--checkpoint", default="runs/student_distill/best.pt")
-    parser.add_argument("--output", default="runs/student_distill/student.onnx")
+    parser.add_argument("--checkpoint", default=None)
+    parser.add_argument("--output", default=None)
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     config = load_yaml(args.config)
-    checkpoint = torch.load(args.checkpoint, map_location="cpu")
+    output_dir = Path(config["training"]["output_dir"])
+    checkpoint_path = args.checkpoint or str(output_dir / "best.pt")
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
     id_classes = checkpoint["student"]["id_classifier.weight"].shape[0] if "id_classifier.weight" in checkpoint["student"] else 0
 
     model = StudentJDE(
@@ -65,7 +67,7 @@ def main() -> int:
     model.eval()
 
     dummy = torch.randn(1, 3, *tuple(load_yaml(config["dataset"]["config"])["dataset"]["input_size"]))
-    output_path = Path(args.output)
+    output_path = Path(args.output) if args.output else output_dir / "student.onnx"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     export_model = OnnxExportWrapper(model)
     torch.onnx.export(

@@ -13,13 +13,13 @@ teacher:
     p3: 384
     p4: 768
     p5: 768
+  use_cache: false
   cache_root: data/teacher_cache
-  use_cache: true
 
 student:
-  backbone_name: mobilenetv3_large
+  backbone_name: resnet50
   pretrained_backbone: true
-  fpn_channels: 192
+  fpn_channels: 384
   emb_dim: 128
   roi_dropout: 0.3
 
@@ -40,8 +40,8 @@ sampler:
 
 optimizer:
   name: adamw
-  lr_backbone: 0.0002
-  lr_heads: 0.0008
+  lr_backbone: 0.0001
+  lr_heads: 0.0005
   weight_decay: 0.0001
   betas: [0.9, 0.999]
 
@@ -55,19 +55,24 @@ training:
   amp: true
   grad_clip: 1.0
   log_interval: 5
-  output_dir: runs/student_distill_mobilenetv3_large_smoke
+  output_dir: runs/student_distill_resnet50_smoke
   temperature: 2.0
+  id_label_smoothing: 0.1
+  checkpoint_interval: 1
 
-phases:
-  - start_epoch: 1
-    end_epoch: 2
-    weights:
-      det: 1.0
-      cls_kd: 0.5
-      box_kd: 0.75
-      feat: 2.0
-      emb: 0.5
-      id: 0.5
+loss_schedule:
+  det:
+    - [1, 2, 0.3, 0.3]
+  cls_kd:
+    - [1, 2, 0.03, 0.03]
+  box_kd:
+    - [1, 2, 0.0, 0.0]
+  feat:
+    - [1, 2, 0.0, 0.0]
+  emb:
+    - [1, 2, 0.0, 0.0]
+  id:
+    - [1, 2, 0.0, 0.0]
 
 inference:
   score_threshold: 0.05

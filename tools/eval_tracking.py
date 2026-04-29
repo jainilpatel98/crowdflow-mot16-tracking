@@ -28,7 +28,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run tracking with the distilled student and export MOT-format results.")
     parser.add_argument("--config", default="configs/student_distill.yaml")
     parser.add_argument("--tracker-config", default="configs/tracker.yaml")
-    parser.add_argument("--checkpoint", default="runs/student_distill/best.pt")
+    parser.add_argument("--checkpoint", default=None)
     parser.add_argument("--sequence-dir", required=True, help="Path to a sequence directory that contains img1/.")
     parser.add_argument("--output", default="outputs/student_tracking.txt")
     parser.add_argument("--output-video", default="", help="Optional path for the annotated tracking video.")
@@ -120,7 +120,8 @@ def main() -> int:
     tracker_cfg = load_yaml(args.tracker_config)["tracker"]
     device = torch.device(config["training"]["device"] if torch.cuda.is_available() else "cpu")
 
-    checkpoint = torch.load(args.checkpoint, map_location=device)
+    checkpoint_path = args.checkpoint or str(Path(config["training"]["output_dir"]) / "best.pt")
+    checkpoint = torch.load(checkpoint_path, map_location=device)
     id_classes = checkpoint["student"]["id_classifier.weight"].shape[0] if "id_classifier.weight" in checkpoint["student"] else 0
     model = StudentJDE(
         backbone_name=config["student"]["backbone_name"],

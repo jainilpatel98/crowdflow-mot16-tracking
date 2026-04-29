@@ -37,7 +37,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--backbone",
         default=None,
-        help="Override student backbone (e.g. resnet50, mobilenetv3_large). Default: from config.",
+        help=(
+            "Override student backbone (e.g. resnet50, resnext101_32x8d, "
+            "se_resnet50, mobilenetv3_large). Default: from config."
+        ),
     )
     parser.add_argument(
         "--use-cache",
@@ -193,29 +196,49 @@ def main() -> int:
         teacher_id_classifier = DDP(teacher_id_classifier, device_ids=[local_rank] if device.type == "cuda" else None)
 
     # ------------------------------------------------------------------
-    # Optimizer — backbone at lower LR, everything else (heads + projector) at head LR
+    # Optimizer — allow finer-grained LR control for larger students while
+    # keeping the old two-group behavior as the default fallback.
     # ------------------------------------------------------------------
     student_inner  = student.module           if hasattr(student, "module")               else student
     adapters_inner = feature_adapters.module  if hasattr(feature_adapters, "module")      else feature_adapters
     proj_inner     = teacher_roi_projector.module if hasattr(teacher_roi_projector, "module") else teacher_roi_projector
     tea_id_inner   = teacher_id_classifier.module if hasattr(teacher_id_classifier, "module") else teacher_id_classifier
 
-    backbone_params = list(student_inner.backbone.parameters())
-    head_params = (
-        [p for n, p in student_inner.named_parameters() if not n.startswith("backbone.")]
-        + list(adapters_inner.parameters())
-        + list(proj_inner.parameters())
-        + list(tea_id_inner.parameters())
-    )
+    lr_backbone = float(config["optimizer"]["lr_backbone"])
+    lr_heads = float(config["optimizer"]["lr_heads"])
+    lr_neck = float(config["optimizer"].get("lr_neck", lr_heads))
+    lr_head = float(config["optimizer"].get("lr_head", lr_heads))
+    lr_aux = float(config["optimizer"].get("lr_aux", lr_heads))
+
+    aux_params = list(student_inner.roi_projector.parameters())
+    if student_inner.id_classifier is not None:
+        aux_params.extend(student_inner.id_classifier.parameters())
+    aux_params.extend(adapters_inner.parameters())
+    aux_params.extend(proj_inner.parameters())
+    aux_params.extend(tea_id_inner.parameters())
+
+    optimizer_param_groups = [
+        {"name": "backbone", "params": list(student_inner.backbone.parameters()), "lr": lr_backbone},
+        {"name": "neck", "params": list(student_inner.neck.parameters()), "lr": lr_neck},
+        {"name": "head", "params": list(student_inner.head.parameters()), "lr": lr_head},
+        {"name": "aux", "params": aux_params, "lr": lr_aux},
+    ]
 
     optimizer = AdamW(
-        [
-            {"params": backbone_params, "lr": config["optimizer"]["lr_backbone"]},
-            {"params": head_params,     "lr": config["optimizer"]["lr_heads"]},
-        ],
+        optimizer_param_groups,
         weight_decay=config["optimizer"]["weight_decay"],
         betas=tuple(config["optimizer"]["betas"]),
     )
+
+    if logger is not None:
+        for group in optimizer_param_groups:
+            param_count = sum(param.numel() for param in group["params"])
+            logger.info(
+                "Optimizer group %-8s lr=%.6g params=%d",
+                group["name"],
+                group["lr"],
+                param_count,
+            )
 
     total_steps  = config["training"]["epochs"] * max(1, len(train_loader))
     warmup_steps = config["scheduler"]["warmup_epochs"] * max(1, len(train_loader))
@@ -258,6 +281,9 @@ def main() -> int:
         id_min_visibility=float(dataset_cfg["dataset"].get("id_visibility_threshold", 0.25)),
         id_label_smoothing=float(config["training"].get("id_label_smoothing", 0.0)),
         checkpoint_interval=int(config["training"].get("checkpoint_interval", 5)),
+        freeze_backbone_stages=config["student"].get("freeze_backbone_stages"),
+        freeze_backbone_stages_until_epoch=int(config["student"].get("freeze_backbone_stages_until_epoch", 0)),
+        backbone_bn_eval=bool(config["student"].get("backbone_bn_eval", False)),
         logger=logger,
     )
 

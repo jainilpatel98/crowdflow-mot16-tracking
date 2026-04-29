@@ -2,7 +2,7 @@ seed: 1337
 
 dataset:
   config: configs/dataset_mot16.yaml
-  batch_size: 4
+  batch_size: 12
 
 teacher:
   ckpt_path: runs/detect/runs/teacher/yolo26x_mot16_person/weights/best.pt

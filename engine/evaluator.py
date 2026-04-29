@@ -9,9 +9,38 @@ except ImportError:  # pragma: no cover - fallback for minimal envs
     def tqdm(iterable, **kwargs):
         return iterable
 
-from engine.inference import decode_student_outputs
-from utils.box_ops import box_iou
+from engine.inference import decode_student_candidates, decode_student_outputs
+from utils.box_ops import batched_nms_xyxy, box_iou
 from utils.metrics import DetectionMetricSummary
+
+
+def _decode_detection_outputs(
+    outputs,
+    *,
+    strides: dict[str, int],
+    score_threshold: float,
+    nms_iou_threshold: float,
+    model_type: str = "student",
+):
+    if model_type == "teacher":
+        detections = []
+        for boxes, scores in zip(outputs["boxes"], outputs["scores"]):
+            sample_dets = [
+                {
+                    "bbox_xyxy": box.detach().cpu().float(),
+                    "score": float(score),
+                }
+                for box, score in zip(boxes, scores)
+                if float(score) >= score_threshold
+            ]
+            detections.append(sample_dets)
+        return detections
+    return decode_student_outputs(
+        outputs,
+        strides=strides,
+        score_threshold=score_threshold,
+        nms_iou_threshold=nms_iou_threshold,
+    )
 
 
 def _match_detections(
@@ -107,22 +136,23 @@ def collect_raw_predictions(
     device: torch.device,
     strides: dict[str, int],
     nms_iou_threshold: float = 0.5,
-) -> tuple[list[dict[str, Any]], dict[int, torch.Tensor], int]:
-    """Run inference once at score_threshold=0 and return all scored candidates.
+    model_type: str = "student",
+) -> tuple[dict[int, dict[str, Any]], dict[int, torch.Tensor], int]:
+    """Run inference once and return raw per-image candidates for threshold sweep.
 
     Returns:
-        raw_predictions: list of {image_id, score, box} for every surviving box
-            after NMS at ``nms_iou_threshold`` but with score_threshold=0.0
-            (so all boxes above 0 confidence are kept).
+        raw_predictions: {image_id: {"boxes", "scores", "needs_nms", ...}}.
+            For student models, this is the pre-threshold, pre-NMS candidate set.
+            For teacher models, boxes/scores are already final detections.
         gt_by_image: {image_id: gt_boxes_xyxy} for mAP computation.
         gt_count: total number of ground-truth boxes.
 
     This is the backbone of the threshold sweep: the model runs exactly once,
-    and each threshold is evaluated analytically by filtering ``raw_predictions``.
+    and each threshold is evaluated analytically with the same threshold->NMS
+    order used during normal student inference.
     """
-    from engine.inference import decode_student_outputs
     model.eval()
-    raw_predictions: list[dict[str, Any]] = []
+    raw_predictions: dict[int, dict[str, Any]] = {}
     gt_by_image: dict[int, torch.Tensor] = {}
     gt_count = 0
     image_id = 0
@@ -130,31 +160,36 @@ def collect_raw_predictions(
     for batch in tqdm(data_loader, desc="Collecting predictions", leave=False):
         images = batch["images"].to(device, non_blocking=True)
         outputs = model(images)
-        # Use a very low threshold so we collect nearly all candidate boxes.
-        # NMS still runs to de-duplicate; only the score filter is relaxed.
-        detections = decode_student_outputs(
-            outputs,
-            strides=strides,
-            score_threshold=0.0,
-            nms_iou_threshold=nms_iou_threshold,
-        )
-        for dets, target in zip(detections, batch["targets"]):
+        if model_type == "student":
+            batch_candidates = decode_student_candidates(outputs, strides)
+        else:
+            batch_candidates = []
+            for boxes, scores in zip(outputs["boxes"], outputs["scores"]):
+                batch_candidates.append(
+                    {
+                        "boxes": boxes.detach().cpu().float(),
+                        "scores": scores.detach().cpu().float(),
+                        "needs_nms": False,
+                    }
+                )
+
+        for candidate, target in zip(batch_candidates, batch["targets"]):
             gt_boxes = target["boxes"].cpu()
             gt_by_image[image_id] = gt_boxes
             gt_count += gt_boxes.shape[0]
-            for det in dets:
-                raw_predictions.append({
-                    "image_id": image_id,
-                    "score": float(det["score"]),
-                    "box": det["bbox_xyxy"].cpu().float(),
-                })
+            raw_predictions[image_id] = {
+                "boxes": candidate["boxes"].detach().cpu().float(),
+                "scores": candidate["scores"].detach().cpu().float(),
+                "needs_nms": bool(candidate.get("needs_nms", model_type == "student")),
+                "nms_iou_threshold": float(nms_iou_threshold),
+            }
             image_id += 1
 
     return raw_predictions, gt_by_image, gt_count
 
 
 def compute_metrics_at_threshold(
-    raw_predictions: list[dict[str, Any]],
+    raw_predictions: dict[int, dict[str, Any]],
     gt_by_image: dict[int, torch.Tensor],
     gt_count: int,
     score_threshold: float,
@@ -164,20 +199,42 @@ def compute_metrics_at_threshold(
     Filters ``raw_predictions`` by ``score_threshold`` and recomputes all
     metrics analytically — no model inference required.
     """
-    filtered = [p for p in raw_predictions if p["score"] >= score_threshold]
-
     tp_total = fp_total = fn_total = 0
     matched_ious_list: list[float] = []
-    pred_count = len(filtered)
+    pred_count = 0
+    filtered: list[dict[str, Any]] = []
 
-    # Build per-image prediction boxes for precision/recall/IoU
-    preds_by_image: dict[int, list[dict[str, Any]]] = {}
-    for p in filtered:
-        preds_by_image.setdefault(p["image_id"], []).append(p)
-
-    all_image_ids = set(gt_by_image.keys()) | set(preds_by_image.keys())
+    all_image_ids = set(gt_by_image.keys()) | set(raw_predictions.keys())
     for img_id in all_image_ids:
-        img_preds = preds_by_image.get(img_id, [])
+        raw = raw_predictions.get(img_id)
+        if raw is None:
+            img_preds = []
+        else:
+            boxes = raw["boxes"]
+            scores = raw["scores"]
+            keep = scores >= score_threshold
+            boxes = boxes[keep]
+            scores = scores[keep]
+            if raw.get("needs_nms", False) and boxes.numel() > 0:
+                nms_keep = batched_nms_xyxy(
+                    boxes,
+                    scores,
+                    iou_threshold=float(raw["nms_iou_threshold"]),
+                    max_detections=300,
+                )
+                boxes = boxes[nms_keep]
+                scores = scores[nms_keep]
+            img_preds = []
+            for box, score in zip(boxes, scores):
+                prediction = {
+                    "image_id": img_id,
+                    "score": float(score.item()),
+                    "box": box,
+                }
+                img_preds.append(prediction)
+                filtered.append(prediction)
+            pred_count += len(img_preds)
+
         gt_boxes = gt_by_image.get(img_id, torch.zeros((0, 4)))
         pred_boxes = (
             torch.stack([p["box"] for p in img_preds], dim=0)
@@ -218,6 +275,7 @@ def evaluate_detection(
     strides: dict[str, int],
     score_threshold: float = 0.25,
     nms_iou_threshold: float = 0.5,
+    model_type: str = "student",
 ) -> DetectionMetricSummary:
     model.eval()
     tp_total = 0
@@ -233,11 +291,12 @@ def evaluate_detection(
     for batch in tqdm(data_loader, desc="Eval", leave=False):
         images = batch["images"].to(device, non_blocking=True)
         outputs = model(images)
-        detections = decode_student_outputs(
+        detections = _decode_detection_outputs(
             outputs,
             strides=strides,
             score_threshold=score_threshold,
             nms_iou_threshold=nms_iou_threshold,
+            model_type=model_type,
         )
         for dets, target in zip(detections, batch["targets"]):
             pred_boxes = (
