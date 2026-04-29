@@ -21,6 +21,11 @@ from torchvision.models import (
     resnext101_32x8d,
 )
 from torchvision.models.resnet import Bottleneck, ResNet
+try:
+    import timm
+    _TIMM_AVAILABLE = True
+except ImportError:
+    _TIMM_AVAILABLE = False
 
 
 class MobileNetV3SmallBackbone(nn.Module):
@@ -99,6 +104,73 @@ def _load_torchvision_backbone(factory, weights_enum, pretrained: bool):
 def _load_partial_pretrained_weights(model: nn.Module, factory, weights_enum) -> None:
     source = _load_torchvision_backbone(factory, weights_enum, pretrained=True)
     model.load_state_dict(source.state_dict(), strict=False)
+
+
+def _build_timm_seresnet(model_name: str, pretrained: bool) -> nn.Module:
+    """Load a SE-ResNet from timm and adapt it to the TorchvisionResNetBackbone interface.
+
+    timm SE-ResNet models (seresnet50.a1_in1k, seresnet101.a1_in1k) trained on
+    ImageNet-1k with stronger augmentations than the partial torchvision init.
+
+    timm uses the same stem/layer1-4 topology as torchvision ResNet, but with
+    slightly different attribute names for the stem components. This function
+    creates a thin shim object that exposes .conv1 / .bn1 / .relu / .maxpool /
+    .layer1-4 so TorchvisionResNetBackbone can consume it unchanged.
+
+    Feature channels: c3=512, c4=1024, c5=2048 — identical to ResNet50/101.
+    The teacher feature_channels (p3=384, p4=768, p5=768) and the adapters
+    (student 384→teacher 384/768/768) are therefore UNCHANGED for SE models.
+    """
+    # Prefer the highest-quality a1 variant; fall back to any available variant
+    candidates = [f"{model_name}.a1_in1k", f"{model_name}.a2_in1k", model_name]
+    timm_model = None
+    for candidate in candidates:
+        try:
+            timm_model = timm.create_model(candidate, pretrained=pretrained, features_only=False)
+            break
+        except Exception:
+            continue
+    if timm_model is None:
+        raise RuntimeError(
+            f"timm could not load any of {candidates}. "
+            "Install timm>=0.9 and ensure internet access for weight download."
+        )
+    timm_model.eval()
+
+    # timm SE-ResNets expose the same attributes as torchvision ResNets,
+    # but the stem BN is named 'bn1' and ReLU is 'act1' in newer timm versions.
+    # Build a minimal shim that TorchvisionResNetBackbone.__init__ expects.
+    class _TimmSEResNetShim(nn.Module):
+        """Shim exposing timm SE-ResNet as a torchvision-ResNet-like module."""
+        def __init__(self, m: nn.Module) -> None:
+            super().__init__()
+            self.conv1   = m.conv1
+            # timm >= 0.9 uses 'bn1' for the stem BN; older versions also used 'bn1'
+            self.bn1     = m.bn1
+            # timm uses 'act1' for the stem activation in newer versions
+            self.relu    = getattr(m, "act1", getattr(m, "relu", nn.ReLU(inplace=True)))
+            self.maxpool = m.maxpool
+            self.layer1  = m.layer1
+            self.layer2  = m.layer2
+            self.layer3  = m.layer3
+            self.layer4  = m.layer4
+
+    return _TimmSEResNetShim(timm_model)
+
+
+def _build_fallback_seresnet(se_factory, res_factory, res_weights_enum, pretrained: bool) -> nn.Module:
+    """Fallback SE-ResNet builder used when timm is not installed.
+
+    Constructs the hand-rolled SEBottleneck ResNet and initialises it with
+    partial torchvision ResNet weights (all non-SE layers are pretrained;
+    SE gate weights start from random init).
+    """
+    backbone = _load_torchvision_backbone(se_factory, None, pretrained=False)
+    if pretrained:
+        _load_partial_pretrained_weights(backbone, res_factory, res_weights_enum)
+    return backbone
+
+
 
 
 class SqueezeExcitation(nn.Module):
@@ -246,25 +318,38 @@ class ResNeXt101Backbone(TorchvisionResNetBackbone):
 
 
 class SEResNet50Backbone(TorchvisionResNetBackbone):
+    """SE-ResNet50 backbone using timm pretrained weights (seresnet50.a1_in1k).
+
+    timm's SE-ResNet has the same stem/layer1-4 structure as torchvision
+    ResNet, so c3/c4/c5 feature channels are identical (512/1024/2048).
+    The teacher adapter mapping is therefore unchanged.
+
+    Falls back to partial torchvision-init if timm is not installed.
+    """
     def __init__(self, pretrained: bool = False) -> None:
-        backbone = _load_torchvision_backbone(se_resnet50, None, pretrained=False)
-        if pretrained:
-            _load_partial_pretrained_weights(backbone, resnet50, ResNet50_Weights)
-        super().__init__(
-            backbone=backbone,
-            out_channels={"c3": 512, "c4": 1024, "c5": 2048},
-        )
+        if _TIMM_AVAILABLE:
+            backbone = _build_timm_seresnet("seresnet50", pretrained=pretrained)
+        else:
+            backbone = _build_fallback_seresnet(
+                se_resnet50, resnet50, ResNet50_Weights, pretrained
+            )
+        super().__init__(backbone=backbone, out_channels={"c3": 512, "c4": 1024, "c5": 2048})
 
 
 class SEResNet101Backbone(TorchvisionResNetBackbone):
+    """SE-ResNet101 backbone using timm pretrained weights (seresnet101.a1_in1k).
+
+    Same adapter-mapping analysis as SEResNet50Backbone applies.
+    Falls back to partial torchvision-init if timm is not installed.
+    """
     def __init__(self, pretrained: bool = False) -> None:
-        backbone = _load_torchvision_backbone(se_resnet101, None, pretrained=False)
-        if pretrained:
-            _load_partial_pretrained_weights(backbone, resnet101, ResNet101_Weights)
-        super().__init__(
-            backbone=backbone,
-            out_channels={"c3": 512, "c4": 1024, "c5": 2048},
-        )
+        if _TIMM_AVAILABLE:
+            backbone = _build_timm_seresnet("seresnet101", pretrained=pretrained)
+        else:
+            backbone = _build_fallback_seresnet(
+                se_resnet101, resnet101, ResNet101_Weights, pretrained
+            )
+        super().__init__(backbone=backbone, out_channels={"c3": 512, "c4": 1024, "c5": 2048})
 
 
 def build_backbone(backbone_name: str, pretrained: bool = False) -> nn.Module:

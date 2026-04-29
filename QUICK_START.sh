@@ -3,12 +3,16 @@
 # QUICK_START.sh — MOT16 YOLO-to-Student Distillation Pipeline
 # =============================================================================
 #
-# USAGE:  ./QUICK_START.sh [command] [--gpus N]
+# USAGE:  ./QUICK_START.sh [command] [--gpus N] [--port PORT]
 #
 # OPTIONS:
 #   --gpus N    Number of GPUs to use for torchrun (default: 4).
 #               Overrides the NGPU environment variable.
 #               Example:  ./QUICK_START.sh train --gpus 2
+#   --port PORT Master port for torchrun rendezvous (default: 29500).
+#               Use a different port for each concurrent training run on the
+#               same server to avoid "address already in use" errors.
+#               Example:  ./QUICK_START.sh train resnext101 --port 29501
 #
 # COMMANDS:
 #   train       Full student distillation run (default student = ResNet50)
@@ -43,6 +47,7 @@ VENV="$ROOT/.venv/bin/python"
 # If no .venv, fall back to whatever python3 is active
 PYTHON="${VENV:-python3}"
 NGPU="${NGPU:-4}"    # default 4; override via --gpus N flag or NGPU=N env var
+PORT="${MASTER_PORT:-29500}"  # default torchrun port; override via --port N flag
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -156,8 +161,8 @@ do_train() {
     #       --use-cache
     # ───────────────────────────────────────────────────────────────────────
     cd "$ROOT"
-    _cmd "torchrun --nproc_per_node=$NGPU tools/train_student.py --config $config"
-    torchrun --nproc_per_node="$NGPU" tools/train_student.py \
+    _cmd "torchrun --nproc_per_node=$NGPU --master-port=$PORT tools/train_student.py --config $config"
+    torchrun --nproc_per_node="$NGPU" --master-port="$PORT" tools/train_student.py \
         --config "$config"
 }
 
@@ -224,8 +229,8 @@ do_train_cache() {
     #       --use-cache
     # ───────────────────────────────────────────────────────────────────────
     cd "$ROOT"
-    _cmd "torchrun --nproc_per_node=$NGPU tools/train_student.py --config $config --use-cache"
-    torchrun --nproc_per_node="$NGPU" tools/train_student.py \
+    _cmd "torchrun --nproc_per_node=$NGPU --master-port=$PORT tools/train_student.py --config $config --use-cache"
+    torchrun --nproc_per_node="$NGPU" --master-port="$PORT" tools/train_student.py \
         --config "$config" \
         --use-cache
 }
@@ -472,6 +477,14 @@ do_help() {
     • Default:       4
     • Example:       ./QUICK_START.sh train --gpus 1
 
+  MASTER PORT (--port PORT):
+    • CLI flag:      --port PORT  (each concurrent training needs a unique port)
+    • Env variable:  MASTER_PORT=PORT ./QUICK_START.sh train
+    • Default:       29500  (torchrun default)
+    • Example (two simultaneous runs on same server):
+        ./QUICK_START.sh train resnet50    --gpus 2 --port 29500
+        ./QUICK_START.sh train resnext101  --gpus 2 --port 29501
+
   USE_CACHE explained:
     • Set in YAML:   teacher.use_cache: true/false  (permanent for that config)
     • CLI override:  --use-cache flag                (one-off, OR with YAML)
@@ -493,6 +506,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --gpus=*)
             NGPU="${1#--gpus=}"
+            shift
+            ;;
+        --port)
+            PORT="$2"
+            shift 2
+            ;;
+        --port=*)
+            PORT="${1#--port=}"
             shift
             ;;
         *)
