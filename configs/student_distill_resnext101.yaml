@@ -65,45 +65,62 @@ training:
   log_interval: 20
   output_dir: runs/student_distill_resnext101
   temperature: 2.0
-  id_label_smoothing: 0.1
+  id_label_smoothing: 0.15   # raised from 0.1 to further regularize ID classifier
   checkpoint_interval: 5
 
 loss_schedule:
+  # Fix 5: det decays in final phase (1.0→0.7) instead of ramping to 1.8.
+  # Prevents memorizing training-frame pedestrian positions in last 20 epochs.
   det:
     - [1, 5, 0.8, 1.0]
     - [5, 60, 1.0, 1.0]
-    - [60, 75, 1.0, 1.8]
-    - [75, 80, 1.8, 1.8]
+    - [60, 80, 1.0, 0.7]
+
+  # Fix 1 (weight side): cls_kd fg_threshold lowered to 0.02 → raw now ~15-40.
+  # Weight reduced from 0.08 to 0.05 so effective contribution ~1-2 (vs det ~14).
   cls_kd:
-    - [1, 5, 0.03, 0.03]      # Foreground-weighted: ~10-50x fewer terms, raise weight accordingly
-    - [5, 15, 0.03, 0.08]     # Ramp up as backbone unfreezes
-    - [15, 40, 0.08, 0.08]    # Hold
-    - [40, 60, 0.08, 0.03]    # Ramp down as det matures
-    - [60, 80, 0.03, 0.0]     # Phase out
+    - [1, 5, 0.02, 0.02]      # Warmup: small to let det establish
+    - [5, 15, 0.02, 0.05]     # Ramp alongside backbone unfreeze
+    - [15, 40, 0.05, 0.05]    # Hold
+    - [40, 60, 0.05, 0.02]    # Ramp down
+    - [60, 80, 0.02, 0.0]     # Phase out as det matures
+
+  # Fix 2 (weight side): box_kd now uses teacher-confident positives.
+  # Teacher-side raw values ~3-8 (healthy), up from frozen 77.
+  # Weight raised to 1.5 so effective box_kd contribution ~5-12 (comparable to det).
   box_kd:
-    - [1, 12, 0.0, 0.0]
-    - [12, 20, 0.0, 0.15]
-    - [20, 60, 0.15, 0.15]
-    - [60, 75, 0.15, 0.05]
-    - [75, 80, 0.05, 0.05]
+    - [1, 10, 0.0, 0.0]       # Let cls_kd establish first
+    - [10, 20, 0.0, 1.5]      # Ramp in once backbone partially unfrozen
+    - [20, 60, 1.5, 1.5]      # Hold
+    - [60, 75, 1.5, 0.5]      # Taper as det dominates final phase
+    - [75, 80, 0.5, 0.5]
+
+  # Fix 4 (weight side): feat_kd now attention-weighted MSE (no normalization).
+  # Raw values ~2-10; weight 1.0 gives effective ~2-10 (meaningful FPN signal).
   feat:
-    - [1, 8, 0.0, 0.0]        # Let detection stabilize first
-    - [8, 20, 0.0, 0.5]       # Ramp in FPN feature alignment
-    - [20, 60, 0.5, 0.5]      # Hold (raw feat_kd ~0.003-0.01 → effective ~0.002-0.005)
-    - [60, 80, 0.5, 0.2]      # Taper as det heads stabilize
+    - [1, 8, 0.0, 0.0]        # Let det stabilize first
+    - [8, 20, 0.0, 1.0]       # Ramp in FPN alignment
+    - [20, 60, 1.0, 1.0]      # Hold
+    - [60, 80, 1.0, 0.3]      # Taper
+
   emb:
     - [1, 28, 0.0, 0.0]
     - [28, 35, 0.0, 0.15]
     - [35, 70, 0.15, 0.15]
     - [70, 80, 0.15, 0.25]
+
+  # Fix 3: id_loss ramps FROM 0 to a small peak (0.008), activating late (epoch 35).
+  # Rationale: ramp from 0 (not to 0) so identity learning begins only after detection
+  # is mature. Cap at 0.008 (effective ~0.09) vs old 0.10 (effective 1.1) to stop
+  # the precision/recall collapse observed when id_loss dominated after epoch 21.
   id:
-    - [1, 20, 0.0, 0.0]
-    - [20, 28, 0.0, 0.10]
-    - [28, 60, 0.10, 0.10]
-    - [60, 70, 0.10, 0.03]
-    - [70, 80, 0.03, 0.03]
+    - [1, 35, 0.0, 0.0]       # Detection-only phase: no identity pressure
+    - [35, 50, 0.0, 0.008]    # Slow ramp — detection must stay stable
+    - [50, 70, 0.008, 0.008]  # Hold small
+    - [70, 80, 0.008, 0.004]  # Slight taper at end
 
 inference:
   score_threshold: 0.05
   nms_iou_threshold: 0.5
   max_detections: 300
+

@@ -378,9 +378,10 @@ class DistillationTrainer:
             temperature=self.temperature,
         )
 
-        # --- Box KD ---
+        # --- Box KD (teacher-confident cells, not student assigner positives) ---
         box_kd = box_kd_loss(
             student_outputs["box"], teacher_outputs["raw_boxes"], assignments,
+            teacher_logits=teacher_outputs.get("logits"),
         )
 
         # --- Feature distillation ---

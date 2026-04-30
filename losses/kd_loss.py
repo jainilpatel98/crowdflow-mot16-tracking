@@ -16,7 +16,7 @@ def classification_kd_loss(
     student_logits: dict[str, torch.Tensor],
     teacher_logits: dict[str, torch.Tensor],
     temperature: float = 2.0,
-    fg_threshold: float = 0.1,
+    fg_threshold: float = 0.02,
 ) -> torch.Tensor:
     """Foreground-weighted classification knowledge distillation.
 
@@ -68,21 +68,62 @@ def box_kd_loss(
     student_boxes: dict[str, torch.Tensor],
     teacher_boxes: dict[str, torch.Tensor],
     assignments: dict[str, LevelAssignment],
+    teacher_logits: dict[str, torch.Tensor] | None = None,
+    teacher_conf_threshold: float = 0.05,
 ) -> torch.Tensor:
+    """Box knowledge distillation loss.
+
+    Computes smooth-L1 + (1-IoU) regression at cells where the teacher is
+    confident (teacher_sigmoid > teacher_conf_threshold).  This is superior
+    to using the student assigner's positives because:
+      - Teacher confidence is reliable from epoch 1 (no bootstrap dependency).
+      - The old student-assigner approach caused box_kd to freeze at ~77 for
+        60 epochs because student and teacher positive cells never aligned.
+
+    Falls back to student-assigner positives if teacher_logits is None.
+
+    Args:
+        student_boxes:           {level: (B, 4, H, W)} student LTRB predictions.
+        teacher_boxes:           {level: (B, 4, H, W)} teacher LTRB predictions.
+        assignments:             Student assigner output (used as fallback).
+        teacher_logits:          {level: (B, 1, H, W)} teacher cls logits for masking.
+        teacher_conf_threshold:  Min teacher sigmoid confidence to count as foreground.
+    """
     total = next(iter(student_boxes.values())).new_tensor(0.0)
     for level_name, stu in student_boxes.items():
         tea = teacher_boxes[level_name]
-        pos_mask = assignments[level_name].pos_mask.squeeze(1)
+
+        # Build positive mask: teacher-confident cells when logits are available
+        if teacher_logits is not None:
+            tea_conf = teacher_logits[level_name].sigmoid().squeeze(1)  # (B, H, W)
+            pos_mask = tea_conf > teacher_conf_threshold
+        else:
+            pos_mask = assignments[level_name].pos_mask.squeeze(1)      # (B, H, W)
+
         if not pos_mask.any():
             total = total + stu.sum() * 0.0
             continue
-        pred_ltrb = stu.permute(0, 2, 3, 1)[pos_mask]
-        teacher_ltrb = tea.permute(0, 2, 3, 1)[pos_mask]
-        points = assignments[level_name].points.unsqueeze(0).expand(stu.shape[0], -1, -1, -1)[pos_mask]
-        pred_boxes = distance2bbox(points, pred_ltrb)
-        teacher_boxes_decoded = distance2bbox(points, teacher_ltrb)
+
+        # Build anchor points at teacher-confident cells
+        if teacher_logits is not None:
+            # points tensor is (H*W, 2) broadcast over batch — expand to (B, H, W, 2)
+            B, _, H, W = stu.shape
+            pts_hw = assignments[level_name].points  # (H, W, 2)
+            pts_batch = pts_hw.unsqueeze(0).expand(B, -1, -1, -1)  # (B, H, W, 2)
+            points = pts_batch[pos_mask]             # (N_pos, 2)
+        else:
+            points = assignments[level_name].points.unsqueeze(0).expand(
+                stu.shape[0], -1, -1, -1
+            )[pos_mask]
+
+        pred_ltrb    = stu.permute(0, 2, 3, 1)[pos_mask]  # (N_pos, 4)
+        teacher_ltrb = tea.permute(0, 2, 3, 1)[pos_mask]  # (N_pos, 4)
+
+        pred_boxes_dec    = distance2bbox(points, pred_ltrb)
+        teacher_boxes_dec = distance2bbox(points, teacher_ltrb)
+
         smooth_l1 = F.smooth_l1_loss(pred_ltrb, teacher_ltrb)
-        iou_term = 1.0 - aligned_iou(pred_boxes, teacher_boxes_decoded).mean()
+        iou_term  = 1.0 - aligned_iou(pred_boxes_dec, teacher_boxes_dec).mean()
         total = total + 0.5 * smooth_l1 + 0.5 * iou_term
     return total
 
@@ -91,18 +132,33 @@ def feature_distill_loss(
     student_features: dict[str, torch.Tensor],
     teacher_features: dict[str, torch.Tensor],
     adapters=None,
-    normalize: bool = True,
 ) -> torch.Tensor:
+    """Attention-weighted feature distillation loss.
+
+    Computes MSE between adapted student features and (detached) teacher
+    features, weighted by teacher activation magnitude so that regions where
+    the teacher FPN is active (near persons) contribute more gradient than
+    background regions.
+
+    This replaces the previous L2-normalized MSE, which collapsed the loss
+    to a constant ~0.003-0.010 regardless of feature alignment quality —
+    making it impossible for the adapter to receive a useful training signal.
+
+    Attention weight: mean(|teacher_features|, dim=C) / (global_mean + eps),
+    normalised so the average weight is 1.0.  This preserves the effective
+    loss magnitude while focusing gradients on person-containing regions.
+    """
     total = next(iter(student_features.values())).new_tensor(0.0)
     adapted = adapters(student_features) if adapters is not None else student_features
     for level_name, stu in adapted.items():
-        tea = teacher_features[level_name]
+        tea = teacher_features[level_name].detach()
         if stu.shape[-2:] != tea.shape[-2:]:
             stu = F.interpolate(stu, size=tea.shape[-2:], mode="bilinear", align_corners=False)
-        if normalize:
-            stu = F.normalize(stu.flatten(2), dim=1).view_as(stu)
-            tea = F.normalize(tea.flatten(2), dim=1).view_as(tea)
-        total = total + F.mse_loss(stu, tea.detach())
+        # Spatial attention: (B, 1, H, W), mean activation magnitude per cell
+        attention = tea.abs().mean(dim=1, keepdim=True)          # (B, 1, H, W)
+        attention = attention / (attention.mean() + 1e-6)         # normalize → mean=1
+        loss = (attention * (stu - tea).pow(2)).mean()
+        total = total + loss
     return total
 
 
