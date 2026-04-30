@@ -213,15 +213,23 @@ def main() -> int:
     aux_params = list(student_inner.roi_projector.parameters())
     if student_inner.id_classifier is not None:
         aux_params.extend(student_inner.id_classifier.parameters())
-    aux_params.extend(adapters_inner.parameters())
+    # NOTE: feature adapters are NOT included here — they get their own group below
+    # so we can apply stronger weight decay to prevent FPN adapter overfitting (Fix 5).
     aux_params.extend(proj_inner.parameters())
     aux_params.extend(tea_id_inner.parameters())
 
+    # Fix 5: feature adapters get a dedicated group with 5× higher weight decay.
+    # The feat_kd adapter showed train/val overfitting (train 0.38, val 0.48).
+    # Stronger L2 regularization reduces adapter memorization of training FPN patterns.
+    adapter_wd = float(config["optimizer"]["weight_decay"]) * 5.0
+
     optimizer_param_groups = [
         {"name": "backbone", "params": list(student_inner.backbone.parameters()), "lr": lr_backbone},
-        {"name": "neck", "params": list(student_inner.neck.parameters()), "lr": lr_neck},
-        {"name": "head", "params": list(student_inner.head.parameters()), "lr": lr_head},
-        {"name": "aux", "params": aux_params, "lr": lr_aux},
+        {"name": "neck",     "params": list(student_inner.neck.parameters()),     "lr": lr_neck},
+        {"name": "head",     "params": list(student_inner.head.parameters()),     "lr": lr_head},
+        {"name": "aux",      "params": aux_params,                                "lr": lr_aux},
+        {"name": "adapters", "params": list(adapters_inner.parameters()),         "lr": lr_aux,
+         "weight_decay": adapter_wd},
     ]
 
     optimizer = AdamW(

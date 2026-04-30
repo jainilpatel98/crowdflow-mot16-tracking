@@ -71,53 +71,74 @@ def box_kd_loss(
     teacher_logits: dict[str, torch.Tensor] | None = None,
     teacher_conf_threshold: float = 0.05,
 ) -> torch.Tensor:
-    """Box knowledge distillation loss.
+    """Box knowledge distillation loss — intersection strategy.
 
-    Computes smooth-L1 + (1-IoU) regression at cells where the teacher is
-    confident (teacher_sigmoid > teacher_conf_threshold).  This is superior
-    to using the student assigner's positives because:
-      - Teacher confidence is reliable from epoch 1 (no bootstrap dependency).
-      - The old student-assigner approach caused box_kd to freeze at ~77 for
-        60 epochs because student and teacher positive cells never aligned.
+    Computes smooth-L1 + (1-IoU) at the INTERSECTION of:
+      (a) student-assigner positives  (cells where det_loss trains the box head)
+      (b) teacher-confident cells     (cells where teacher has a valid box target)
 
-    Falls back to student-assigner positives if teacher_logits is None.
+    **Why intersection is critical:**
+    Previous attempts used either (a) alone or (b) alone:
+    - Student-assigner-only (train3): box_kd frozen at 77 because teacher/student
+      assignment cells never spatially aligned — IoU ≈ 0 always.
+    - Teacher-confident-only (train4/5): gradient CONFLICT. At teacher-positive /
+      student-NEGATIVE cells, det_loss pushes classification → background, but
+      box_kd pushes box head → teacher LTRB. The box head receives opposing
+      gradients from two separate loss surfaces and plateaus at 24-25.
+
+    At the intersection:
+    - det_loss is ALREADY training the box head to regress GT LTRB at those cells.
+    - box_kd adds the teacher's LTRB as a complementary soft target.
+    - Both signals push the box head in the SAME direction (teacher ≈ GT for MOT16).
+    - The loss decreases from the very first intersection-containing batch.
+
+    Falls back to student-assigner positives if the intersection is empty (rare,
+    mainly in the first 1-2 epochs before the teacher fires confidently on
+    training images).
 
     Args:
         student_boxes:           {level: (B, 4, H, W)} student LTRB predictions.
         teacher_boxes:           {level: (B, 4, H, W)} teacher LTRB predictions.
-        assignments:             Student assigner output (used as fallback).
-        teacher_logits:          {level: (B, 1, H, W)} teacher cls logits for masking.
-        teacher_conf_threshold:  Min teacher sigmoid confidence to count as foreground.
+        assignments:             Student assigner output (box targets + pos_mask).
+        teacher_logits:          {level: (B, 1, H, W)} teacher cls logits for mask.
+        teacher_conf_threshold:  Min teacher sigmoid to count as teacher-positive.
     """
     total = next(iter(student_boxes.values())).new_tensor(0.0)
     for level_name, stu in student_boxes.items():
         tea = teacher_boxes[level_name]
+        asgn = assignments[level_name]
 
-        # Build positive mask: teacher-confident cells when logits are available
-        if teacher_logits is not None:
-            tea_conf = teacher_logits[level_name].sigmoid().squeeze(1)  # (B, H, W)
-            pos_mask = tea_conf > teacher_conf_threshold
-        else:
-            pos_mask = assignments[level_name].pos_mask.squeeze(1)      # (B, H, W)
+        # (a) Student-assigner positives: cells where det_loss trains the box head
+        stu_pos = asgn.pos_mask.squeeze(1)  # (B, H, W) bool
 
-        if not pos_mask.any():
+        if not stu_pos.any():
             total = total + stu.sum() * 0.0
             continue
 
-        # Build anchor points at teacher-confident cells
+        # (b) Teacher-confident: cells where teacher provides a reliable LTRB target
         if teacher_logits is not None:
-            # points tensor is (H*W, 2) broadcast over batch — expand to (B, H, W, 2)
-            B, _, H, W = stu.shape
-            pts_hw = assignments[level_name].points  # (H, W, 2)
-            pts_batch = pts_hw.unsqueeze(0).expand(B, -1, -1, -1)  # (B, H, W, 2)
-            points = pts_batch[pos_mask]             # (N_pos, 2)
-        else:
-            points = assignments[level_name].points.unsqueeze(0).expand(
-                stu.shape[0], -1, -1, -1
-            )[pos_mask]
+            tea_conf = teacher_logits[level_name].sigmoid().squeeze(1)  # (B, H, W)
+            tea_pos  = tea_conf > teacher_conf_threshold                 # (B, H, W)
 
-        pred_ltrb    = stu.permute(0, 2, 3, 1)[pos_mask]  # (N_pos, 4)
-        teacher_ltrb = tea.permute(0, 2, 3, 1)[pos_mask]  # (N_pos, 4)
+            # Intersection: both student assigner positive AND teacher confident
+            pos_mask = stu_pos & tea_pos
+            if not pos_mask.any():
+                # Fallback: student assigner positives only (teacher not yet confident)
+                pos_mask = stu_pos
+        else:
+            pos_mask = stu_pos
+
+        # Anchor points from student assigner — always in correct student-stride space
+        B = stu.shape[0]
+        pts_batch = asgn.points.unsqueeze(0).expand(B, -1, -1, -1)  # (B, H, W, 2)
+        points = pts_batch[pos_mask]                                  # (N_pos, 2)
+
+        pred_ltrb    = stu.permute(0, 2, 3, 1)[pos_mask]  # (N_pos, 4) — student predictions
+        teacher_ltrb = tea.permute(0, 2, 3, 1)[pos_mask]  # (N_pos, 4) — teacher soft target
+
+        # Clamp teacher LTRB to non-negative (teacher LTRB should be positive pixel
+        # distances; small negatives from floating-point rounding cause IoU = 0)
+        teacher_ltrb = teacher_ltrb.clamp(min=0.0)
 
         pred_boxes_dec    = distance2bbox(points, pred_ltrb)
         teacher_boxes_dec = distance2bbox(points, teacher_ltrb)
@@ -126,6 +147,7 @@ def box_kd_loss(
         iou_term  = 1.0 - aligned_iou(pred_boxes_dec, teacher_boxes_dec).mean()
         total = total + 0.5 * smooth_l1 + 0.5 * iou_term
     return total
+
 
 
 def feature_distill_loss(

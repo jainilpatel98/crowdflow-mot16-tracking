@@ -34,10 +34,10 @@ assigner:
     p4: 16
     p5: 32
   area_ranges:
-    p3: [0, 2304]
-    p4: [2304, 16384]
-    p5: [16384, 1000000000]
-  center_radius: 1.5
+    p3: [0, 4096]           # up to 64px² (was 48px²) — catches more small pedestrians
+    p4: [2304, 20736]       # 48-144px overlap range (was 48-128px hard boundary)
+    p5: [14400, 1000000000] # 120px+ (was 128px+) — slight overlap with p4 to avoid gaps
+  center_radius: 2.5        # from 1.5 — 5×5 cells per GT box (vs 3×3); critical for recall
 
 sampler:
   balance_sequences: true
@@ -69,58 +69,51 @@ training:
   checkpoint_interval: 5
 
 loss_schedule:
-  # Fix 5: det decays in final phase (1.0→0.7) instead of ramping to 1.8.
-  # Prevents memorizing training-frame pedestrian positions in last 20 epochs.
+  # Fix 2: det held flat at 1.0 for the ENTIRE run — no decay.
+  # Rationale: the model peaked at epoch 13 then degraded for 67 epochs. The
+  # phase-4 decay (1.0→0.7) removed gradient signal exactly when the model
+  # needed it most. Hold flat to give consistent detection learning throughout.
   det:
     - [1, 5, 0.8, 1.0]
-    - [5, 60, 1.0, 1.0]
-    - [60, 80, 1.0, 0.7]
+    - [5, 80, 1.0, 1.0]   # Hold — never decay
 
-  # Fix 1 (weight side): cls_kd fg_threshold lowered to 0.02 → raw now ~15-40.
-  # Weight reduced from 0.08 to 0.05 so effective contribution ~1-2 (vs det ~14).
+  # cls_kd: unchanged threshold logic (fg_threshold=0.02 in code).
+  # Weight: ramp then HOLD. No decay.
   cls_kd:
     - [1, 5, 0.02, 0.02]      # Warmup: small to let det establish
     - [5, 15, 0.02, 0.05]     # Ramp alongside backbone unfreeze
-    - [15, 40, 0.05, 0.05]    # Hold
-    - [40, 60, 0.05, 0.02]    # Ramp down
-    - [60, 80, 0.02, 0.0]     # Phase out as det matures
+    - [15, 80, 0.05, 0.05]    # Hold — no decay (was phasing out at epoch 40-80)
 
-  # Fix 2 (weight side): box_kd now uses teacher-confident positives.
-  # Teacher-side raw values ~3-8 (healthy), up from frozen 77.
-  # Weight raised to 1.5 so effective box_kd contribution ~5-12 (comparable to det).
+  # Fix 1 (code) + Fix 4 (schedule): box_kd now uses intersection strategy.
+  # Fix 4: box_kd ramp starts at epoch 22 — AFTER feat ramp is complete (epoch 20).
+  # This prevents the simultaneous feat+box_kd increase that crashed mAP at epoch 13→14.
+  # Weight 1.0 (reduced from 1.5): intersection gives ~5-10 raw, so 1.0 → effective 5-10.
+  # Hold flat — no decay.
   box_kd:
-    - [1, 10, 0.0, 0.0]       # Let cls_kd establish first
-    - [10, 20, 0.0, 1.5]      # Ramp in once backbone partially unfrozen
-    - [20, 60, 1.5, 1.5]      # Hold
-    - [60, 75, 1.5, 0.5]      # Taper as det dominates final phase
-    - [75, 80, 0.5, 0.5]
+    - [1, 12, 0.0, 0.0]       # Let det + cls_kd establish alone
+    - [12, 22, 0.0, 1.0]      # Ramp in AFTER feat is stable (feat completes at epoch 20)
+    - [22, 80, 1.0, 1.0]      # Hold — no decay
 
-  # Fix 4 (weight side): feat_kd now attention-weighted MSE (no normalization).
-  # Raw values ~2-10; weight 1.0 gives effective ~2-10 (meaningful FPN signal).
+  # Fix 4 (schedule): feat ramp completes at epoch 20 — before box_kd starts.
+  # Hold flat at 0.8 (reduced from 1.0 to reduce adapter overfitting pressure).
+  # No decay in final phase.
   feat:
     - [1, 8, 0.0, 0.0]        # Let det stabilize first
-    - [8, 20, 0.0, 1.0]       # Ramp in FPN alignment
-    - [20, 60, 1.0, 1.0]      # Hold
-    - [60, 80, 1.0, 0.3]      # Taper
+    - [8, 20, 0.0, 0.8]       # Ramp in FPN alignment — completes at epoch 20
+    - [20, 80, 0.8, 0.8]      # Hold flat — no decay
 
   emb:
     - [1, 28, 0.0, 0.0]
     - [28, 35, 0.0, 0.15]
-    - [35, 70, 0.15, 0.15]
-    - [70, 80, 0.15, 0.25]
+    - [35, 80, 0.15, 0.15]    # Hold flat — no decay
 
-  # Fix 3: id_loss ramps FROM 0 to a small peak (0.008), activating late (epoch 35).
-  # Rationale: ramp from 0 (not to 0) so identity learning begins only after detection
-  # is mature. Cap at 0.008 (effective ~0.09) vs old 0.10 (effective 1.1) to stop
-  # the precision/recall collapse observed when id_loss dominated after epoch 21.
+  # id_loss: keep activation at epoch 35, small weight, HOLD flat. No decay.
   id:
     - [1, 35, 0.0, 0.0]       # Detection-only phase: no identity pressure
     - [35, 50, 0.0, 0.008]    # Slow ramp — detection must stay stable
-    - [50, 70, 0.008, 0.008]  # Hold small
-    - [70, 80, 0.008, 0.004]  # Slight taper at end
+    - [50, 80, 0.008, 0.008]  # Hold flat — no decay
 
 inference:
   score_threshold: 0.05
   nms_iou_threshold: 0.5
   max_detections: 300
-
