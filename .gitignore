@@ -40,7 +40,6 @@ build/
 # Datasets (DO NOT COMMIT)
 MOT16/
 data/
-datasets/
 MOT16.zip
 *.zip
 *.tar
