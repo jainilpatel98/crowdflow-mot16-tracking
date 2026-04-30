@@ -16,7 +16,13 @@ except ImportError:  # pragma: no cover
 from engine.hooks import save_checkpoint
 from losses.det_loss import detection_loss
 from losses.id_loss import id_supervision_loss
-from losses.kd_loss import box_kd_loss, classification_kd_loss, embedding_cosine_loss, feature_distill_loss
+from losses.kd_loss import (
+    box_kd_loss,
+    classification_kd_loss,
+    dense_emb_alignment_loss,
+    embedding_cosine_loss,
+    feature_distill_loss,
+)
 from engine.evaluator import evaluate_detection
 from utils.distributed import is_main_process, reduce_scalar
 from utils.logger import SmoothedValue
@@ -378,10 +384,15 @@ class DistillationTrainer:
             temperature=self.temperature,
         )
 
-        # --- Box KD (teacher-confident cells, not student assigner positives) ---
+        # --- Box KD (Fix 1: matched decoded xyxy detections, not raw_boxes) ---
+        # teacher_outputs["boxes"] is a list of per-image xyxy Tensors in pixel space,
+        # which are compatible with the student's stride-normalised LTRB coordinate system
+        # (after dividing by stride via bbox2distance).  raw_boxes was DFL model-space
+        # values in [-0.8, 13] range — not pixel distances — causing the frozen loss.
         box_kd = box_kd_loss(
-            student_outputs["box"], teacher_outputs["raw_boxes"], assignments,
-            teacher_logits=teacher_outputs.get("logits"),
+            student_outputs["box"],
+            teacher_outputs["boxes"],    # Fix 1: decoded xyxy (not raw_boxes)
+            assignments,
         )
 
         # --- Feature distillation ---
@@ -391,12 +402,33 @@ class DistillationTrainer:
             adapters=self.feature_adapters,
         )
 
+
+        # image_size needed by dense_emb_alignment_loss and the ROI embedding losses below
+        image_size = tuple(targets[0]["image_size"].tolist())
+
+        # --- Dense embedding alignment (Fix 6) ---
+        # Align emb_pred dense map to roi_projector embeddings at assigner-positive
+        # cells so the inference embedding path is actually trained.
+        # Uses non-detached FPN features so gradients flow into emb_tower.
+        # roi_projector is used with torch.no_grad() as a fixed target source.
+        student_inner = (
+            self.student_model.module
+            if hasattr(self.student_model, "module")
+            else self.student_model
+        )
+        dense_emb = dense_emb_alignment_loss(
+            student_outputs["emb"],
+            student_outputs["features"],   # non-detached FPN features
+            student_inner.roi_projector,
+            assignments,
+            image_size=image_size,
+        )
+
         # --- Embedding KD and ID loss (student ROI ↔ teacher ROI projector) ---
         # CRITICAL: FPN features are detached before ROI pooling so that emb_kd and
         # id_loss gradients do NOT flow back through the FPN. This prevents these
         # losses from overwriting the detection representations built by det/cls_kd/box_kd.
         # Only the ROI projector and id_classifier are trained by these losses.
-        image_size = tuple(targets[0]["image_size"].tolist())
         emb_boxes, _ = _select_supervision_boxes(targets, self.embedding_min_visibility)
         student_roi = student_outputs["roi_embeddings"]
 
@@ -471,26 +503,32 @@ class DistillationTrainer:
             id_loss = student_roi.sum() * 0.0
 
         # --- Total ---
+        # dense_emb weight tracks the emb schedule weight (small, ramps with emb).
+        # It is intentionally not a separate config key — it should be
+        # proportional to emb so both embedding losses activate together.
+        dense_emb_weight = weights["emb"] * 0.5  # half of emb weight
         total_loss = (
-            weights["det"]    * det_losses["total"]
+            weights["det"]      * det_losses["total"]
             + weights["cls_kd"] * cls_kd
             + weights["box_kd"] * box_kd
             + weights["feat"]   * feat_kd
             + weights["emb"]    * emb_kd
             + weights["id"]     * id_loss
+            + dense_emb_weight  * dense_emb
         )
 
         log_items = {
-            "loss":    float(total_loss.detach()),
-            "det":     float(det_losses["total"].detach()),
-            "det_cls": float(det_losses["cls"].detach()),
-            "det_obj": float(det_losses["obj"].detach()),
-            "det_box": float(det_losses["box"].detach()),
-            "cls_kd":  float(cls_kd.detach()),
-            "box_kd":  float(box_kd.detach()),
-            "feat_kd": float(feat_kd.detach()),
-            "emb_kd":  float(emb_kd.detach()),
-            "id_loss": float(id_loss.detach()),
+            "loss":      float(total_loss.detach()),
+            "det":       float(det_losses["total"].detach()),
+            "det_cls":   float(det_losses["cls"].detach()),
+            "det_obj":   float(det_losses["obj"].detach()),
+            "det_box":   float(det_losses["box"].detach()),
+            "cls_kd":    float(cls_kd.detach()),
+            "box_kd":    float(box_kd.detach()),
+            "feat_kd":   float(feat_kd.detach()),
+            "emb_kd":    float(emb_kd.detach()),
+            "id_loss":   float(id_loss.detach()),
+            "dense_emb": float(dense_emb.detach()),
         }
         return total_loss, log_items
 

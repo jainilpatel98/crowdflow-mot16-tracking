@@ -22,6 +22,7 @@ student:
   fpn_channels: 384
   emb_dim: 128
   roi_dropout: 0.5
+  tower_layers: 3       # Fix 5: deeper head (was 2); 3-layer towers for ResNeXt101 scale
   # Large students copy the teacher too quickly on MOT16.
   # Keep more of the pretrained backbone fixed through the early detection-only stage.
   freeze_backbone_stages: [stem, layer1, layer2]
@@ -84,15 +85,12 @@ loss_schedule:
     - [5, 15, 0.02, 0.05]     # Ramp alongside backbone unfreeze
     - [15, 80, 0.05, 0.05]    # Hold — no decay (was phasing out at epoch 40-80)
 
-  # Fix 1 (code) + Fix 4 (schedule): box_kd now uses intersection strategy.
-  # Fix 4: box_kd ramp starts at epoch 22 — AFTER feat ramp is complete (epoch 20).
-  # This prevents the simultaneous feat+box_kd increase that crashed mAP at epoch 13→14.
-  # Weight 1.0 (reduced from 1.5): intersection gives ~5-10 raw, so 1.0 → effective 5-10.
-  # Hold flat — no decay.
+  # Fix 1: box_kd disabled (weight=0) for the first run.
+  # The new matched-detection implementation uses teacher_outputs["boxes"] (decoded xyxy)
+  # via bbox2distance to produce stride-normalised LTRB targets — correct coordinate system.
+  # Set weight=1.0 once you confirm teacher detections are reasonable on MOT16 val.
   box_kd:
-    - [1, 12, 0.0, 0.0]       # Let det + cls_kd establish alone
-    - [12, 22, 0.0, 1.0]      # Ramp in AFTER feat is stable (feat completes at epoch 20)
-    - [22, 80, 1.0, 1.0]      # Hold — no decay
+    - [1, 80, 0.0, 0.0]   # DISABLED — set to non-zero to enable after verifying
 
   # Fix 4 (schedule): feat ramp completes at epoch 20 — before box_kd starts.
   # Hold flat at 0.8 (reduced from 1.0 to reduce adapter overfitting pressure).

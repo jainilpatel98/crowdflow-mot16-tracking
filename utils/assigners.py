@@ -148,28 +148,29 @@ class PyramidAssigner:
                 new_ids = ids[best_gt]         # (H, W)
                 track_ids[bi] = torch.where(update, new_ids, track_ids[bi])
 
-                # box_targets (LTRB): gather best GT per cell
-                # ltrb: (M, H, W, 4) → gather on dim 0 using best_gt
+                # box_targets (LTRB / stride): gather best GT per cell.
+                # Fix 3: Normalize by stride so the shared box regressor sees
+                # O(1) targets regardless of FPN level.  Decode = pred * stride → pixel.
                 best_gt_4 = best_gt.unsqueeze(0).unsqueeze(-1).expand(1, H, W, 4)
-                best_ltrb = ltrb.gather(0, best_gt_4).squeeze(0)   # (H, W, 4)
-                best_ltrb = best_ltrb.permute(2, 0, 1)             # (4, H, W)
+                best_ltrb = ltrb.gather(0, best_gt_4).squeeze(0)   # (H, W, 4) pixel LTRB
+                best_ltrb_norm = (best_ltrb / stride).permute(2, 0, 1)  # (4, H, W) normalized
                 for c in range(4):
-                    box_targets[bi, c] = torch.where(update, best_ltrb[c], box_targets[bi, c])
+                    box_targets[bi, c] = torch.where(update, best_ltrb_norm[c], box_targets[bi, c])
 
                 # box_xyxy: gather best GT box coords
                 best_boxes = boxes[best_gt.reshape(-1)].reshape(H, W, 4).permute(2, 0, 1)  # (4,H,W)
                 for c in range(4):
                     box_xyxy_out[bi, c] = torch.where(update, best_boxes[c], box_xyxy_out[bi, c])
 
-                # obj_targets (centerness)
-                l_v = best_ltrb[0];  r_v = best_ltrb[2]
-                t_v = best_ltrb[1];  b_v = best_ltrb[3]
+                # obj_targets (centerness) — computed from pixel LTRB (H,W,4)
+                l_v, t_v, r_v, b_v = best_ltrb.unbind(-1)   # each (H, W)
                 lr_min = torch.minimum(l_v, r_v)
                 lr_max = torch.maximum(l_v, r_v).clamp(min=1e-6)
                 tb_min = torch.minimum(t_v, b_v)
                 tb_max = torch.maximum(t_v, b_v).clamp(min=1e-6)
                 centerness = ((lr_min / lr_max) * (tb_min / tb_max)).clamp(min=0).sqrt()
                 obj_targets[bi, 0] = torch.where(update, centerness, obj_targets[bi, 0])
+
 
             assignments[level_name] = LevelAssignment(
                 cls_targets=cls_targets,

@@ -144,6 +144,7 @@ def main() -> int:
         pretrained_backbone=config["student"].get("pretrained_backbone", True),
         num_id_classes=train_dataset.num_identities,
         roi_dropout=roi_dropout,
+        tower_layers=int(config["student"].get("tower_layers", 2)),  # Fix 5
     ).to(device)
 
     teacher = None
