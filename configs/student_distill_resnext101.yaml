@@ -38,7 +38,8 @@ assigner:
     p3: [0, 4096]           # up to 64px² (was 48px²) — catches more small pedestrians
     p4: [2304, 20736]       # 48-144px overlap range (was 48-128px hard boundary)
     p5: [14400, 1000000000] # 120px+ (was 128px+) — slight overlap with p4 to avoid gaps
-  center_radius: 2.5        # from 1.5 — 5×5 cells per GT box (vs 3×3); critical for recall
+  center_radius: 1.5        # reverted from 2.5 — 5×5 positive zone caused too many
+                             # duplicate cells per GT, saturating NMS with low-quality dets
 
 sampler:
   balance_sequences: true
@@ -51,7 +52,7 @@ optimizer:
   lr_neck: 0.0002
   lr_head: 0.0002
   lr_aux: 0.0003
-  weight_decay: 0.0003
+  weight_decay: 0.001     # raised from 0.0003 to fight 36× train/val det gap (memorization)
   betas: [0.9, 0.999]
 
 scheduler:
@@ -85,12 +86,13 @@ loss_schedule:
     - [5, 15, 0.02, 0.05]     # Ramp alongside backbone unfreeze
     - [15, 80, 0.05, 0.05]    # Hold — no decay (was phasing out at epoch 40-80)
 
-  # Fix 1: box_kd disabled (weight=0) for the first run.
-  # The new matched-detection implementation uses teacher_outputs["boxes"] (decoded xyxy)
-  # via bbox2distance to produce stride-normalised LTRB targets — correct coordinate system.
-  # Set weight=1.0 once you confirm teacher detections are reasonable on MOT16 val.
+  # box_kd: enabled at small weight to improve localization at strict IoU thresholds.
+  # mAP@0.5:0.95=0.197 (train7) shows boxes are imprecise beyond IoU=0.5.
+  # The matched-detection fix (Fix 1) uses decoded xyxy — correct coordinate system.
+  # Ramp in late (ep40) after det and feat are stable.
   box_kd:
-    - [1, 80, 0.0, 0.0]   # DISABLED — set to non-zero to enable after verifying
+    - [1, 40, 0.0, 0.0]    # Let det+feat establish first
+    - [40, 80, 0.0, 0.5]   # Ramp in for the final 40 epochs
 
   # Fix 4 (schedule): feat ramp completes at epoch 20 — before box_kd starts.
   # Hold flat at 0.8 (reduced from 1.0 to reduce adapter overfitting pressure).
@@ -112,6 +114,11 @@ loss_schedule:
     - [50, 80, 0.008, 0.008]  # Hold flat — no decay
 
 inference:
-  score_threshold: 0.05
+  # score_threshold raised to 0.30 from 0.05.
+  # At 0.05 with score=sigmoid(cls)-only, virtually every grid cell (sigmoid(0)~0.5)
+  # passes threshold → 378k preds at eval, 254/image, Prec=0.032.
+  # At 0.30 only cells with genuine cls confidence pass, fixing the precision floor.
+  # Use --sweep-threshold in eval_detection.py to find the exact optimal threshold.
+  score_threshold: 0.30
   nms_iou_threshold: 0.5
   max_detections: 300

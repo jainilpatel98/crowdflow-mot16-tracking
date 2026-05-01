@@ -85,6 +85,13 @@ def parse_args() -> argparse.Namespace:
         metavar="FLOAT",
         help="Step size between thresholds in sweep mode (default: 0.02).",
     )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=0,
+        help="DataLoader worker processes for eval. Default 0 (main process only) avoids "
+             "macOS multiprocessing deadlocks. Set higher on Linux for speed.",
+    )
     return parser.parse_args()
 
 
@@ -118,7 +125,10 @@ def _build_model_and_loader(args, config, dataset_cfg, device):
         val_dataset,
         batch_size=config["dataset"].get("batch_size", 16),
         shuffle=False,
-        num_workers=dataset_cfg["dataset"].get("num_workers", 8),
+        # num_workers=0: run in main process to avoid macOS multiprocessing
+        # deadlock (DataLoader workers hang on join after iteration completes).
+        # Pass --num-workers N to use worker processes on Linux.
+        num_workers=args.num_workers,
         collate_fn=mot_collate_fn,
     )
 

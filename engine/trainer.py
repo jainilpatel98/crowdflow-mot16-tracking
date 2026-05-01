@@ -282,7 +282,11 @@ class DistillationTrainer:
         # best.pt is selected by inline mAP@0.5 (threshold-independent quality metric
         # that captures the full P-R curve; superior to val_det loss which rises after
         # backbone unfreeze even as detection quality improves).
-        self.best_val_map50 = 0.0
+        # best.pt selection criterion: F1 (harmonic mean of P and R).
+        # mAP@0.5 was selecting the highest-recall epoch (Prec=0.03, F1=0.06)
+        # because at score_threshold=0.05 almost every cell passes, making
+        # recall dominate.  F1 penalises the precision collapse.
+        self.best_val_score = 0.0
         self.strides = dict(strides) if strides is not None else {}
         self.score_threshold = float(score_threshold)
         self.nms_iou_threshold = float(nms_iou_threshold)
@@ -698,8 +702,9 @@ class DistillationTrainer:
             if self.checkpoint_interval > 0 and epoch % self.checkpoint_interval == 0:
                 save_checkpoint(checkpoint, self.output_dir, f"epoch_{epoch:03d}.pt")
 
-            # best.pt is selected by inline mAP@0.5 evaluation.
-            # Falls back to -val_det (higher=better) if strides were not provided.
+             # best.pt: select by F1 (balances the precision collapse caused by
+             # sigmoid(cls)-only scoring at score_threshold=0.05).
+             # Falls back to -val_det if strides were not provided.
             if self.strides:
                 _summary = evaluate_detection(
                     self.student_model,
@@ -709,25 +714,25 @@ class DistillationTrainer:
                     score_threshold=self.score_threshold,
                     nms_iou_threshold=self.nms_iou_threshold,
                 )
-                current_map50 = _summary.map50
+                current_score = _summary.f1   # F1 — penalises pure-recall operating points
                 if self.logger:
                     self.logger.info(
                         "Epoch %d  mAP@0.5=%.4f  Prec=%.4f  Rec=%.4f  F1=%.4f",
-                        epoch, current_map50,
+                        epoch, _summary.map50,
                         _summary.precision, _summary.recall, _summary.f1,
                     )
             else:
                 # Legacy fallback: no strides provided
-                current_map50 = -val_metrics["det"]
-                if self.best_val_map50 == 0.0:
-                    self.best_val_map50 = current_map50 - 1.0  # ensure first epoch saves
-            if current_map50 > self.best_val_map50:
-                self.best_val_map50 = current_map50
+                current_score = -val_metrics["det"]
+                if self.best_val_score == 0.0:
+                    self.best_val_score = current_score - 1.0  # ensure first epoch saves
+            if current_score > self.best_val_score:
+                self.best_val_score = current_score
                 save_checkpoint(checkpoint, self.output_dir, "best.pt")
                 if self.logger:
                     self.logger.info(
-                        "New best checkpoint at epoch %d (mAP@0.5=%.4f)",
-                        epoch, current_map50,
+                        "New best checkpoint at epoch %d (F1=%.4f)",
+                        epoch, current_score,
                     )
 
             (self.output_dir / "history.json").write_text(
