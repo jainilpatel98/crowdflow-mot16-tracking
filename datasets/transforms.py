@@ -278,12 +278,22 @@ def _apply_affine_and_flip(
     boxes: np.ndarray,
     cfg: TransformConfig,
     train: bool,
-) -> tuple[Image.Image, np.ndarray]:
-    """Apply random affine transform + horizontal flip (training only)."""
+) -> tuple[Image.Image, np.ndarray, np.ndarray]:
+    """Apply random affine transform + horizontal flip (training only).
+
+    Returns:
+        image, boxes, valid_mask — a boolean mask over the *original* box indices
+        that survived the affine/flip filter.  Apply the mask to all parallel
+        arrays (track_ids, track_labels, visibilities) in the caller.
+        For val (train=False) the mask is all-True.
+    """
     if not train:
-        return image, boxes
+        return image, boxes, np.ones(len(boxes), dtype=bool)
 
     w, h = image.size
+    # Cumulative validity (starts all-True)
+    valid = np.ones(len(boxes), dtype=bool)
+
     do_flip = random.random() < cfg.horizontal_flip_prob
     if do_flip:
         image = image.transpose(Image.FLIP_LEFT_RIGHT)
@@ -298,17 +308,16 @@ def _apply_affine_and_flip(
         ty = random.uniform(-cfg.affine_translate, cfg.affine_translate) * h
         image = image.rotate(angle, translate=(tx, ty), resample=Image.BILINEAR, fillcolor=(114, 114, 114))
         if len(boxes) > 0:
-            # Approximate: shift boxes by translation (rotation handled loosely)
             boxes = boxes.copy()
             boxes[:, [0, 2]] += tx
             boxes[:, [1, 3]] += ty
-            # clip
             boxes[:, [0, 2]] = boxes[:, [0, 2]].clip(0, w)
             boxes[:, [1, 3]] = boxes[:, [1, 3]].clip(0, h)
-            valid = ((boxes[:, 2] - boxes[:, 0]) > 2) & ((boxes[:, 3] - boxes[:, 1]) > 2)
-            boxes = boxes[valid]
+            affine_valid = ((boxes[:, 2] - boxes[:, 0]) > 2) & ((boxes[:, 3] - boxes[:, 1]) > 2)
+            boxes = boxes[affine_valid]
+            valid = valid & affine_valid  # accumulate into the overall mask
 
-    return image, boxes
+    return image, boxes, valid
 
 
 def _to_tensor(image: Image.Image) -> torch.Tensor:
@@ -340,13 +349,20 @@ class MotTransforms:
         """Transform a single raw sample dict into a model-ready dict."""
         cfg = self.cfg
         image: Image.Image = sample["image"]
-        boxes: np.ndarray = sample["boxes"]
+        boxes: np.ndarray  = sample["boxes"]
+        track_ids:     np.ndarray = sample["track_ids"]
+        track_labels:  np.ndarray = sample["track_labels"]
+        visibilities:  np.ndarray = sample["visibilities"]
 
         if self.train:
             # HSV color jitter
             image = _hsv_jitter(image, cfg.hsv_h, cfg.hsv_s, cfg.hsv_v)
-            # Affine + flip (before letterbox so boxes are in original space)
-            image, boxes = _apply_affine_and_flip(image, boxes, cfg, train=True)
+            # Affine + flip — returns valid mask to keep boxes/metadata in sync
+            image, boxes, valid = _apply_affine_and_flip(image, boxes, cfg, train=True)
+            if not valid.all():
+                track_ids    = track_ids[valid]
+                track_labels = track_labels[valid]
+                visibilities = visibilities[valid]
 
         # Scale jitter (train) or fixed scale (val)
         if self.train:
@@ -372,19 +388,19 @@ class MotTransforms:
         image_tensor = _to_tensor(image_lb)
 
         return {
-            "images": image_tensor,
-            "boxes": torch.as_tensor(lb_boxes, dtype=torch.float32),
-            "track_ids": torch.as_tensor(sample["track_ids"], dtype=torch.long),
-            "track_labels": torch.as_tensor(sample["track_labels"], dtype=torch.long),
-            "visibilities": torch.as_tensor(sample["visibilities"], dtype=torch.float32),
+            "images":       image_tensor,
+            "boxes":        torch.as_tensor(lb_boxes,     dtype=torch.float32),
+            "track_ids":    torch.as_tensor(track_ids,    dtype=torch.long),
+            "track_labels": torch.as_tensor(track_labels, dtype=torch.long),
+            "visibilities": torch.as_tensor(visibilities, dtype=torch.float32),
             "ignore_boxes": torch.as_tensor(sample.get("ignore_boxes", np.zeros((0, 4), np.float32)), dtype=torch.float32),
-            "orig_size": torch.as_tensor(sample["orig_size"], dtype=torch.long),
-            "image_size": torch.as_tensor(cfg.input_size, dtype=torch.long),
+            "orig_size":    torch.as_tensor(sample["orig_size"],   dtype=torch.long),
+            "image_size":   torch.as_tensor(cfg.input_size,        dtype=torch.long),
             "resize_scale": scale,
-            "pad": (pad_top, pad_left),
-            "image_path": sample["image_path"],
-            "sequence_name": sample["sequence_name"],
-            "frame_idx": sample["frame_idx"],
+            "pad":          (pad_top, pad_left),
+            "image_path":      sample["image_path"],
+            "sequence_name":   sample["sequence_name"],
+            "frame_idx":       sample["frame_idx"],
             "teacher_cache_path": sample.get("teacher_cache_path"),
         }
 
@@ -399,10 +415,13 @@ class MotTransforms:
 
         merged = _mosaic_4(samples, cfg.input_size)
 
-        # Post-mosaic: affine + flip (image already at input_size)
-        image, boxes = _apply_affine_and_flip(
+        # Post-mosaic affine + flip — apply valid mask to all parallel arrays
+        image, boxes, valid = _apply_affine_and_flip(
             merged["image"], merged["boxes"], cfg, train=True
         )
+        track_ids    = merged["track_ids"][valid]
+        track_labels = merged["track_labels"][valid]
+        visibilities = merged["visibilities"][valid]
 
         # Motion blur
         if random.random() < cfg.motion_blur_prob:
@@ -413,9 +432,9 @@ class MotTransforms:
         return {
             "images": image_tensor,
             "boxes": torch.as_tensor(boxes, dtype=torch.float32),
-            "track_ids": torch.as_tensor(merged["track_ids"], dtype=torch.long),
-            "track_labels": torch.as_tensor(merged["track_labels"], dtype=torch.long),
-            "visibilities": torch.as_tensor(merged["visibilities"], dtype=torch.float32),
+            "track_ids":    torch.as_tensor(track_ids,    dtype=torch.long),
+            "track_labels": torch.as_tensor(track_labels, dtype=torch.long),
+            "visibilities": torch.as_tensor(visibilities, dtype=torch.float32),
             "ignore_boxes": torch.as_tensor(merged["ignore_boxes"], dtype=torch.float32),
             "orig_size": torch.as_tensor(merged["orig_size"], dtype=torch.long),
             "image_size": torch.as_tensor(cfg.input_size, dtype=torch.long),
