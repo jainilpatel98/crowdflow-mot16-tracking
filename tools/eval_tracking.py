@@ -130,6 +130,7 @@ def main() -> int:
         fpn_channels=config["student"]["fpn_channels"],
         pretrained_backbone=False,
         num_id_classes=id_classes,
+        tower_layers=int(config["student"].get("tower_layers", 2)),
     ).to(device)
     validate_checkpoint_shapes(checkpoint, model, feature_adapters=None)
     model.load_state_dict(checkpoint["student"])
