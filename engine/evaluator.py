@@ -211,25 +211,34 @@ def compute_metrics_at_threshold(
 ) -> "DetectionMetricSummary":
     """Compute detection metrics from pre-collected raw predictions at a given threshold.
 
-    Filters ``raw_predictions`` by ``score_threshold`` and recomputes all
-    metrics analytically — no model inference required.
+    P/R/F1/pred_count are computed at ``score_threshold``.
+    mAP is computed from ALL post-NMS predictions (full ranked list, threshold-independent).
+
+    This matches the COCO AP definition: the PR curve sweeps every post-NMS prediction
+    sorted by score, not just those above the operating-point threshold.  Previously, AP
+    was computed from threshold-filtered predictions, causing mAP to drop as threshold
+    rose (truncated PR curve) — that was a measurement bug, not a model degradation.
     """
     tp_total = fp_total = fn_total = 0
     matched_ious_list: list[float] = []
     pred_count = 0
-    filtered: list[dict[str, Any]] = []
+
+    # all_preds: full post-NMS ranked list  → used for threshold-independent AP
+    # filtered:  predictions >= score_threshold → used for P/R/F1 and pred_count
+    all_preds: list[dict[str, Any]] = []
+    filtered:  list[dict[str, Any]] = []
 
     all_image_ids = set(gt_by_image.keys()) | set(raw_predictions.keys())
-    for img_id in all_image_ids:
+    for img_id in sorted(all_image_ids):   # sorted for determinism
         raw = raw_predictions.get(img_id)
         if raw is None:
-            img_preds = []
+            img_preds_thresh = []
         else:
-            boxes = raw["boxes"]
+            boxes  = raw["boxes"]
             scores = raw["scores"]
-            keep = scores >= score_threshold
-            boxes = boxes[keep]
-            scores = scores[keep]
+
+            # NMS over ALL candidates (no score gate) so the ranked list for AP
+            # is not biased by the operating-point threshold.
             if raw.get("needs_nms", False) and boxes.numel() > 0:
                 nms_keep = batched_nms_xyxy(
                     boxes,
@@ -237,23 +246,33 @@ def compute_metrics_at_threshold(
                     iou_threshold=float(raw["nms_iou_threshold"]),
                     max_detections=300,
                 )
-                boxes = boxes[nms_keep]
-                scores = scores[nms_keep]
-            img_preds = []
-            for box, score in zip(boxes, scores):
-                prediction = {
+                boxes_nms  = boxes[nms_keep]
+                scores_nms = scores[nms_keep]
+            else:
+                boxes_nms  = boxes
+                scores_nms = scores
+
+            # Accumulate the full post-NMS list for AP
+            for box, score in zip(boxes_nms, scores_nms):
+                all_preds.append({
                     "image_id": img_id,
-                    "score": float(score.item()),
-                    "box": box,
-                }
-                img_preds.append(prediction)
-                filtered.append(prediction)
-            pred_count += len(img_preds)
+                    "score":    float(score.item()),
+                    "box":      box,
+                })
+
+            # Threshold-filtered list for P/R/F1
+            keep = scores_nms >= score_threshold
+            img_preds_thresh = []
+            for box, score in zip(boxes_nms[keep], scores_nms[keep]):
+                p = {"image_id": img_id, "score": float(score.item()), "box": box}
+                img_preds_thresh.append(p)
+                filtered.append(p)
+            pred_count += len(img_preds_thresh)
 
         gt_boxes = gt_by_image.get(img_id, torch.zeros((0, 4)))
         pred_boxes = (
-            torch.stack([p["box"] for p in img_preds], dim=0)
-            if img_preds else torch.zeros((0, 4))
+            torch.stack([p["box"] for p in img_preds_thresh], dim=0)
+            if img_preds_thresh else torch.zeros((0, 4))
         )
         tp, fp, fn, ious = _match_detections(pred_boxes, gt_boxes)
         tp_total += tp
@@ -262,12 +281,13 @@ def compute_metrics_at_threshold(
         matched_ious_list.extend(ious)
 
     precision = tp_total / max(1, tp_total + fp_total)
-    recall = tp_total / max(1, tp_total + fn_total)
-    mean_iou = sum(matched_ious_list) / max(1, len(matched_ious_list))
+    recall    = tp_total / max(1, tp_total + fn_total)
+    mean_iou  = sum(matched_ious_list) / max(1, len(matched_ious_list))
 
+    # AP from the full post-NMS ranked list (threshold-independent, matches COCO)
     ap_thresholds = [0.5 + 0.05 * i for i in range(10)]
     ap_values = [
-        _compute_average_precision(filtered, gt_by_image, gt_count, t)
+        _compute_average_precision(all_preds, gt_by_image, gt_count, t)
         for t in ap_thresholds
     ]
     return DetectionMetricSummary(
