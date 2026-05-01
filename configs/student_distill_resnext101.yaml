@@ -114,11 +114,13 @@ loss_schedule:
     - [50, 80, 0.008, 0.008]  # Hold flat — no decay
 
 inference:
-  # score_threshold raised to 0.30 from 0.05.
-  # At 0.05 with score=sigmoid(cls)-only, virtually every grid cell (sigmoid(0)~0.5)
-  # passes threshold → 378k preds at eval, 254/image, Prec=0.032.
-  # At 0.30 only cells with genuine cls confidence pass, fixing the precision floor.
-  # Use --sweep-threshold in eval_detection.py to find the exact optimal threshold.
-  score_threshold: 0.30
+  # score_threshold=0.50 is the sweep-optimal F1 operating point (train7 best.pt sweep):
+  #   Thresh  mAP@.5  Precision  Recall    F1       Preds
+  #   0.500   0.3959  0.7736     0.4268    0.5501   10,557
+  #   0.400   0.4225  0.6348     0.4649    0.5367   14,014
+  #   0.350   0.4336  0.5611     0.4835    0.5194   16,488
+  # For MOT tracking (where recall matters more than precision), consider 0.35-0.40:
+  #   threshold=0.35 gives R=0.484, P=0.561, F1=0.519 — better recall at slightly worse P.
+  score_threshold: 0.50
   nms_iou_threshold: 0.5
   max_detections: 300
