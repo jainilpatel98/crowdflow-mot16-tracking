@@ -1,17 +1,26 @@
 #!/usr/bin/env python3
 """Evaluate detection quality on the MOT16 validation sequences.
 
-Single-threshold mode (default):
+Student model — single threshold (default):
     python tools/eval_detection.py --config configs/student_distill_resnet50.yaml \
         --checkpoint runs/student_distill_resnet50/best.pt
 
-Override threshold from CLI (ignores config value):
-    python tools/eval_detection.py ... --score-threshold 0.10
+Student model — threshold sweep:
+    python tools/eval_detection.py --config configs/student_distill_resnext101.yaml \
+        --checkpoint runs/student_distill_resnext101/best.pt --sweep-threshold
 
-Threshold sweep mode (model inference runs ONCE; all thresholds are analytical):
-    python tools/eval_detection.py ... --sweep-threshold
+Teacher model — single threshold:
+    python tools/eval_detection.py --config configs/student_distill_resnext101.yaml \
+        --model-type teacher --score-threshold 0.25
+
+Teacher model — threshold sweep (collection has no score filter; all detections evaluated):
+    python tools/eval_detection.py --config configs/student_distill_resnext101.yaml \
+        --model-type teacher --sweep-threshold \
+        --threshold-min 0.05 --threshold-max 0.90 --threshold-step 0.05
+
+Custom sweep range:
     python tools/eval_detection.py ... --sweep-threshold \
-        --threshold-min 0.05 --threshold-max 0.50 --threshold-step 0.02
+        --threshold-min 0.05 --threshold-max 0.80 --threshold-step 0.02
 """
 from __future__ import annotations
 
@@ -47,15 +56,20 @@ def parse_args() -> argparse.Namespace:
         epilog=__doc__,
     )
     parser.add_argument("--config", default="configs/student_distill.yaml")
-    parser.add_argument("--checkpoint", default=None)
-    parser.add_argument("--model-type", choices=("student", "teacher"), default="student")
+    parser.add_argument("--checkpoint", default=None,
+                        help="Path to checkpoint (.pt). For teacher, defaults to the YOLO "
+                             "checkpoint in config['teacher']['ckpt_path'].")
+    parser.add_argument("--model-type", choices=("student", "teacher"), default="student",
+                        help="Which model to evaluate: 'student' (default) or 'teacher'.")
 
     # --- Single-threshold override ---
     parser.add_argument(
         "--score-threshold",
         type=float,
         default=None,
-        help="Override inference.score_threshold from config (single-threshold mode).",
+        help="Override score_threshold from config (single-threshold mode). "
+             "For the teacher this filters the YOLO post-NMS detections. "
+             "Default: reads inference.score_threshold from config.",
     )
 
     # --- Sweep mode ---
@@ -63,28 +77,32 @@ def parse_args() -> argparse.Namespace:
         "--sweep-threshold",
         action="store_true",
         help="Sweep score thresholds and print a comparison table. "
-             "Model inference runs only once; all thresholds are evaluated analytically.",
+             "Model inference runs ONCE; all thresholds are evaluated analytically. "
+             "Works for both --model-type student and --model-type teacher.",
     )
     parser.add_argument(
         "--threshold-min",
         type=float,
-        default=0.05,
+        default=None,
         metavar="FLOAT",
-        help="Lowest threshold to evaluate in sweep mode (default: 0.05).",
+        help="Lowest threshold to evaluate in sweep mode. "
+             "Default: 0.05 for student, 0.05 for teacher.",
     )
     parser.add_argument(
         "--threshold-max",
         type=float,
-        default=0.50,
+        default=None,
         metavar="FLOAT",
-        help="Highest threshold to evaluate in sweep mode (default: 0.50).",
+        help="Highest threshold to evaluate in sweep mode. "
+             "Default: 0.80 for student, 0.90 for teacher "
+             "(teachers typically have scores up to ~0.95).",
     )
     parser.add_argument(
         "--threshold-step",
         type=float,
-        default=0.02,
+        default=0.05,
         metavar="FLOAT",
-        help="Step size between thresholds in sweep mode (default: 0.02).",
+        help="Step size between thresholds in sweep mode (default: 0.05).",
     )
     parser.add_argument(
         "--num-workers",
@@ -97,6 +115,14 @@ def parse_args() -> argparse.Namespace:
 
 
 class TeacherForDetectionEval(torch.nn.Module):
+    """Wraps TeacherWrapper for detection evaluation.
+
+    During collection (sweep mode) we intentionally do NOT apply a score
+    threshold here — all YOLO post-NMS detections are stored, and the sweep
+    applies the threshold analytically.  In single-threshold mode the
+    threshold is applied in the evaluator's _decode_detection_outputs.
+    """
+
     def __init__(self, teacher: TeacherWrapper) -> None:
         super().__init__()
         self.teacher = teacher
@@ -105,7 +131,7 @@ class TeacherForDetectionEval(torch.nn.Module):
     def forward(self, images: torch.Tensor) -> dict[str, object]:
         teacher_outputs = self.teacher(images)
         return {
-            "boxes": teacher_outputs["boxes"],
+            "boxes":  teacher_outputs["boxes"],
             "scores": teacher_outputs["scores"],
         }
 
@@ -143,7 +169,8 @@ def _build_model_and_loader(args, config, dataset_cfg, device):
         )
         model = TeacherForDetectionEval(teacher).to(device)
     else:
-        checkpoint_path = args.checkpoint or str(Path(config["training"]["output_dir"]) / "best.pt")
+        output_dir = config.get("training", {}).get("output_dir", "runs/student_distill")
+        checkpoint_path = args.checkpoint or str(Path(output_dir) / "best.pt")
         checkpoint = torch.load(checkpoint_path, map_location=device)
         id_classes = (
             checkpoint["student"]["id_classifier.weight"].shape[0]
@@ -183,6 +210,16 @@ def _sweep_rank(summary, threshold: float) -> tuple[float, float, float, float]:
     return (summary.f1, summary.map50_95, summary.precision, threshold)
 
 
+def _resolve_sweep_range(args) -> tuple[float, float, float]:
+    """Resolve --threshold-min/max/step with model-type-aware defaults."""
+    is_teacher = args.model_type == "teacher"
+    t_min  = args.threshold_min  if args.threshold_min  is not None else 0.05
+    # Teacher scores span up to ~0.95; student scores rarely exceed 0.80.
+    t_max  = args.threshold_max  if args.threshold_max  is not None else (0.90 if is_teacher else 0.80)
+    t_step = args.threshold_step  # same default for both (0.05)
+    return t_min, t_max, t_step
+
+
 def _run_sweep(args, model, loader, device, strides, nms_iou_threshold: float) -> None:
     """Collect predictions once, then sweep thresholds analytically.
 
@@ -191,8 +228,13 @@ def _run_sweep(args, model, loader, device, strides, nms_iou_threshold: float) -
     - IoU matrices are precomputed on GPU and cached in RAM
     - AP is computed once (10 IoU thresholds) using cached matrices, not 130×
     - Threshold sweep only does cheap score-threshold filtering
+
+    For both student and teacher models, all post-NMS detections are stored
+    during collection without any score filtering.  The sweep then applies
+    different thresholds analytically — same code path for both model types.
     """
-    print("Collecting raw predictions (NMS on GPU, IoU matrices cached)…")
+    model_label = args.model_type.capitalize()
+    print(f"Collecting {model_label} predictions (NMS on GPU, IoU matrices cached)…")
     raw_preds, gt_by_image, gt_count = collect_raw_predictions(
         model, loader, device=device,
         strides=strides,
@@ -200,10 +242,24 @@ def _run_sweep(args, model, loader, device, strides, nms_iou_threshold: float) -
         model_type=args.model_type,
     )
     nms_candidate_count = sum(item["boxes"].shape[0] for item in raw_preds.values())
+
+    # Report score range so user can choose an appropriate sweep window
+    all_scores = torch.cat([d["scores"] for d in raw_preds.values() if d["scores"].numel() > 0])
+    if all_scores.numel() > 0:
+        score_info = (
+            f"  Score range: min={all_scores.min().item():.3f}  "
+            f"median={all_scores.median().item():.3f}  "
+            f"max={all_scores.max().item():.3f}"
+        )
+    else:
+        score_info = "  (no detections collected)"
+
     print(
         f"Collected {nms_candidate_count:,} post-NMS candidates over {len(gt_by_image)} images "
-        f"({gt_count:,} GT boxes).\n"
+        f"({gt_count:,} GT boxes)."
     )
+    print(score_info)
+    print()
 
     # ── Compute AP ONCE (threshold-independent) before the sweep loop ──────
     # This is the key speedup: AP at 10 IoU thresholds uses cached IoU matrices
@@ -213,11 +269,12 @@ def _run_sweep(args, model, loader, device, strides, nms_iou_threshold: float) -
     print(f"  mAP@0.5={ap_values[0]:.4f}  mAP@0.5:0.95={sum(ap_values)/len(ap_values):.4f}\n")
 
     # Build threshold list
+    t_min, t_max, t_step = _resolve_sweep_range(args)
     thresholds: list[float] = []
-    t = args.threshold_min
-    while t <= args.threshold_max + 1e-9:
+    t = t_min
+    while t <= t_max + 1e-9:
         thresholds.append(round(t, 6))
-        t += args.threshold_step
+        t += t_step
 
     # Header
     col_w = 7
@@ -264,14 +321,26 @@ def _run_sweep(args, model, loader, device, strides, nms_iou_threshold: float) -
     print("Selection rule: highest F1, with mAP@0.5:0.95 / precision / threshold as tie-breakers.")
     print("\nFull metrics at best threshold:")
     _print_single(best_summary)
-    print(f"\nHint: set inference.score_threshold: {best_thresh} in your config.")
+
+    # Model-type-aware config hint
+    if args.model_type == "teacher":
+        print(
+            f"\nHint: this is the teacher's operating point. "
+            f"Use --score-threshold {best_thresh} when running teacher eval in single-threshold mode."
+        )
+    else:
+        print(f"\nHint: set inference.score_threshold: {best_thresh} in your config.")
 
 
 def main() -> int:
     args = parse_args()
     config = load_yaml(args.config)
     dataset_cfg = load_yaml(config["dataset"]["config"])
-    device = torch.device(config["training"]["device"] if torch.cuda.is_available() else "cpu")
+
+    # Determine device: teacher eval can run standalone without training config
+    training_cfg = config.get("training", {})
+    device_str = training_cfg.get("device", "cuda") if torch.cuda.is_available() else "cpu"
+    device = torch.device(device_str)
 
     model, loader = _build_model_and_loader(args, config, dataset_cfg, device)
 
@@ -288,6 +357,7 @@ def main() -> int:
         if args.score_threshold is not None
         else float(config["inference"]["score_threshold"])
     )
+    print(f"Evaluating {args.model_type} model | score_threshold={score_threshold}")
     summary = evaluate_detection(
         model,
         loader,
