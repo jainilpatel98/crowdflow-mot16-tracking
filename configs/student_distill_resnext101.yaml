@@ -22,12 +22,10 @@ student:
   fpn_channels: 384
   emb_dim: 128
   roi_dropout: 0.5
-  tower_layers: 3         # 3-layer towers for ResNeXt101 scale
-  tower_dropout: 0.1      # P5: head regularization — fights the det train/val gap
-  # Keep backbone fixed longer: train7 showed val_det diverged right at ep15 unfreeze.
-  # Delaying to ep25 lets the head + neck adapt first before the full backbone unlocks.
+  tower_layers: 3
+  tower_dropout: 0.1      # head regularization — validated effective in train9
   freeze_backbone_stages: [stem, layer1, layer2]
-  freeze_backbone_stages_until_epoch: 25   # raised from 15 (train8 peak was ep19)
+  freeze_backbone_stages_until_epoch: 25   # validated: kept det_gap from widening
   backbone_bn_eval: true
 
 assigner:
@@ -36,16 +34,19 @@ assigner:
     p4: 16
     p5: 32
   area_ranges:
-    p3: [0, 4096]           # up to 64px² — catches more small pedestrians
+    p3: [0, 4096]           # up to 64px² — catches small pedestrians
     p4: [2304, 20736]       # 48-144px overlap range
-    p5: [14400, 1000000000] # 120px+ — slight overlap with p4 to avoid gaps
-  # P1: per-level center_radius — small objects at p3 need more positive candidates.
-  # 3×3 zone at stride=8 is only 24px wide; 5×5=40px covers typical pedestrian width.
-  # p4/p5 use tighter radius (larger strides cover more space per cell).
+    p5: [14400, 1000000000] # 120px+
+  # Per-level center_radius.
   center_radius:
-    p3: 2.5    # 5×5 cells × stride=8 = 40px center zone — good coverage for small peds
-    p4: 2.0    # 5×5 cells × stride=16 = 80px center zone
-    p5: 1.5    # 4×4 cells × stride=32 = 96px center zone — conservative for large objects
+    p3: 2.5    # 5×5 cells × stride=8 = 40px center zone
+    p4: 2.0    # 5×5 cells × stride=16 = 80px zone
+    p5: 1.5    # 4×4 cells × stride=32 = 96px zone
+  # P1 (train10): Relax point-in-box for small GT boxes.
+  # GT boxes below 32×32=1024px² skip the inside-box check → use center-only
+  # assignment.  This is the root fix for the recall ceiling: per-level radius
+  # expansions are inert when the inside constraint discards all the new cells.
+  small_obj_area_threshold: 1024  # 32×32 px²
 
 sampler:
   balance_sequences: true
@@ -53,12 +54,12 @@ sampler:
 
 optimizer:
   name: adamw
-  lr_backbone: 0.000005   # P3: halved from 1e-5 to slow backbone drift (model peaked ep19)
+  lr_backbone: 0.000005   # validated low LR keeps backbone drift controlled
   lr_heads: 0.0002
   lr_neck: 0.0002
   lr_head: 0.0002
   lr_aux: 0.0003
-  weight_decay: 0.001     # raised from 0.0003 to fight train/val det gap (memorization)
+  weight_decay: 0.001     # validated: narrowed det_gap from 1.84→1.15
   betas: [0.9, 0.999]
 
 scheduler:
@@ -67,58 +68,55 @@ scheduler:
 
 training:
   device: cuda
-  epochs: 50              # P6: reduced from 80; best checkpoint was ep19 — 31 wasted epochs
+  epochs: 65              # P3: extended from 50; train9 best=ep41, still ~0.013 F1 below peak
+                          # at ep50 — adding 15 more epochs to confirm and capture the tail.
   amp: true
   grad_clip: 1.0
   log_interval: 20
   output_dir: runs/student_distill_resnext101
   temperature: 2.0
-  id_label_smoothing: 0.15   # further regularize ID classifier
+  id_label_smoothing: 0.15
   checkpoint_interval: 5
 
 loss_schedule:
-  # det held flat at 1.0 for the ENTIRE run — no decay.
   det:
     - [1, 5, 0.8, 1.0]
-    - [5, 50, 1.0, 1.0]   # Hold — never decay
+    - [5, 65, 1.0, 1.0]   # Hold — never decay
 
-  # cls_kd: ramp then HOLD. No decay.
   cls_kd:
     - [1, 5, 0.02, 0.02]
-    - [5, 25, 0.02, 0.05]    # extended ramp alongside backbone unfreeze (ep25)
-    - [25, 50, 0.05, 0.05]   # Hold flat
+    - [5, 25, 0.02, 0.05]  # Ramp alongside backbone unfreeze (ep25)
+    - [25, 65, 0.05, 0.05] # Hold flat
 
-  # P4: box_kd moved from ep40 → ep15 so it benefits the best-checkpoint window.
-  # train8 best.pt was ep19 — with ep40 onset, box_kd never contributed to the winner.
+  # P4: box_kd now uses GT-anchored CIoU (0.75·CIoU(pred,GT) + 0.25·CIoU(pred,teacher)).
+  # Onset at ep15 is preserved from train9 — box_kd must see the best-checkpoint window.
   box_kd:
     - [1, 15, 0.0, 0.0]      # Let det stabilize first
     - [15, 30, 0.0, 0.5]     # Ramp in alongside backbone unfreeze
-    - [30, 50, 0.5, 0.5]     # Hold flat
+    - [30, 65, 0.5, 0.5]     # Hold flat
 
-  # feat: ramp completes before emb/id to avoid simultaneous optimizer shocks.
   feat:
-    - [1, 8, 0.0, 0.0]        # Let det stabilize first
-    - [8, 20, 0.0, 0.8]       # Ramp in FPN alignment
-    - [20, 50, 0.8, 0.8]      # Hold flat
+    - [1, 8, 0.0, 0.0]
+    - [8, 20, 0.0, 0.8]
+    - [20, 65, 0.8, 0.8]     # Hold flat
 
   emb:
     - [1, 28, 0.0, 0.0]
     - [28, 35, 0.0, 0.15]
-    - [35, 50, 0.15, 0.15]    # Hold flat
+    - [35, 65, 0.15, 0.15]   # Hold flat
 
-  # id_loss: small weight, activation delayed until detection stable.
   id:
-    - [1, 35, 0.0, 0.0]       # Detection-only phase
-    - [35, 45, 0.0, 0.008]    # Slow ramp
-    - [45, 50, 0.008, 0.008]  # Hold flat
+    - [1, 35, 0.0, 0.0]
+    - [35, 50, 0.0, 0.008]   # Slow ramp
+    - [50, 65, 0.008, 0.008] # Hold flat
 
 inference:
-  # score_threshold=0.50 is the sweep-optimal F1 operating point (train8 best.pt sweep):
-  #   Thresh  mAP@.5  Precision  Recall    F1       Preds
-  #   0.500   0.5031  0.8386     0.4521    0.5875   10,316
-  #   0.450   0.5031  0.7375     0.4712    0.5750   12,227
-  #   0.400   0.5031  0.6190     0.4910    0.5476   15,177
-  # For MOT tracking (recall matters more), consider 0.40-0.45.
+  # score_threshold=0.50 is the sweep-optimal F1 operating point (train9 best.pt sweep):
+  #   Thresh  mAP@.5   Precision  Recall    F1       Preds
+  #   0.500   0.5036   0.8718     0.4526    0.5959   9,935
+  #   0.450   0.5036   0.7886     0.4697    0.5887  11,398
+  #   0.400   0.5036   0.6849     0.4879    0.5699  13,633
+  # For MOT tracking (recall > precision), consider score_threshold=0.40.
   score_threshold: 0.50
   nms_iou_threshold: 0.5
   max_detections: 300

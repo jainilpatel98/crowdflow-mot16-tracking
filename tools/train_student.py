@@ -266,6 +266,9 @@ def main() -> int:
             if isinstance(config["assigner"]["center_radius"], dict)
             else float(config["assigner"]["center_radius"])
         ),
+        small_obj_area_threshold=float(
+            config["assigner"].get("small_obj_area_threshold", 1024.0)
+        ),
     )
 
     # Support both new per-loss ramp format (loss_schedule dict) and legacy

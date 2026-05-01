@@ -28,6 +28,11 @@ class PyramidAssigner:
     2. Compute centre-radius mask: candidate grid cells within `center_radius`
        of each GT box centre (in grid-cell units).
     3. Compute point-in-box mask: grid point must lie inside the GT box.
+       For small GT boxes (area < small_obj_area_threshold) the inside-box
+       check is SKIPPED — only the centre-radius mask is used.  This prevents
+       the recall ceiling for pedestrians smaller than ~32×32px, where so few
+       grid cells fall inside the box that center_radius adjustments have no
+       effect.
     4. Resolve conflicts: assign each grid cell to the smallest-area GT that
        covers it (tie-breaking by area encourages correct scale assignment).
 
@@ -40,12 +45,16 @@ class PyramidAssigner:
         strides: dict[str, int],
         area_ranges: dict[str, tuple[float, float]],
         center_radius: float | dict[str, float] = 1.5,
+        small_obj_area_threshold: float = 1024.0,  # 32×32 px²
     ) -> None:
         self.strides = strides
         self.area_ranges = area_ranges
         # Allow per-level radius: {p3: 2.5, p4: 2.0, p5: 1.5}
         # or a single scalar applied to all levels.
         self.center_radius = center_radius
+        # GT boxes with area below this threshold skip the point-in-box check.
+        # Set to 0.0 to disable (revert to pure inside-check for all sizes).
+        self.small_obj_area_threshold = small_obj_area_threshold
 
     def assign(
         self,
@@ -129,7 +138,14 @@ class PyramidAssigner:
                 ltrb = torch.stack([left, top, right, bottom], dim=-1).view(M, H, W, 4)
 
                 # ---- 4. Combined validity & conflict resolution ----
-                valid = center_mask & inside                # (M, H, W)
+                # For small GT boxes the point-in-box check is skipped:
+                # a 16×24px box at stride=8 has only 2×3=6 cells strictly
+                # inside, making center_radius expansions ineffective.  For
+                # these objects we use center-only assignment so that the full
+                # center_radius zone becomes active.
+                is_small = (areas < self.small_obj_area_threshold)  # (M,)
+                use_center_only = is_small.view(M, 1, 1)  # (M, 1, 1) broadcastable
+                valid = torch.where(use_center_only, center_mask, center_mask & inside)
 
                 # Replace invalid cells with inf area so they lose conflicts
                 areas_exp = areas.view(M, 1, 1).expand(M, H, W)

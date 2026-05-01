@@ -657,6 +657,12 @@ class DistillationTrainer:
 
     def fit(self, train_loader, val_loader, epochs: int) -> None:
         history = []
+        # Rolling F1 buffer: checkpoint is saved when the 3-epoch rolling
+        # mean F1 exceeds the previous best rolling mean.  This smooths the
+        # ±0.01 single-epoch noise observed in train9 and avoids saving a
+        # lucky spike as best.pt when the model hasn't actually improved.
+        from collections import deque
+        f1_history: deque[float] = deque(maxlen=3)
         for epoch in range(1, epochs + 1):
             self._configure_backbone_for_epoch(epoch)
             if self.logger is not None and is_main_process():
@@ -714,15 +720,19 @@ class DistillationTrainer:
                     score_threshold=self.score_threshold,
                     nms_iou_threshold=self.nms_iou_threshold,
                 )
-                current_score = _summary.f1   # F1 — penalises pure-recall operating points
+                current_f1 = _summary.f1
+                f1_history.append(current_f1)
+                # Use 3-epoch rolling mean as the selection criterion to
+                # suppress per-epoch noise (±0.01 F1 swings in train9).
+                rolling_f1 = sum(f1_history) / len(f1_history)
+                current_score = rolling_f1
                 if self.logger:
                     self.logger.info(
-                        "Epoch %d  mAP@0.5=%.4f  Prec=%.4f  Rec=%.4f  F1=%.4f",
+                        "Epoch %d  mAP@0.5=%.4f  Prec=%.4f  Rec=%.4f  F1=%.4f  RollingF1(3)=%.4f",
                         epoch, _summary.map50,
-                        _summary.precision, _summary.recall, _summary.f1,
+                        _summary.precision, _summary.recall, current_f1, rolling_f1,
                     )
             else:
-                # Legacy fallback: no strides provided
                 current_score = -val_metrics["det"]
                 if self.best_val_score == 0.0:
                     self.best_val_score = current_score - 1.0  # ensure first epoch saves
@@ -731,8 +741,8 @@ class DistillationTrainer:
                 save_checkpoint(checkpoint, self.output_dir, "best.pt")
                 if self.logger:
                     self.logger.info(
-                        "New best checkpoint at epoch %d (F1=%.4f)",
-                        epoch, current_score,
+                        "New best checkpoint at epoch %d (F1=%.4f, RollingF1=%.4f)",
+                        epoch, current_f1 if self.strides else current_score, current_score,
                     )
 
             (self.output_dir / "history.json").write_text(

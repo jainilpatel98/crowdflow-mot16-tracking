@@ -6,7 +6,7 @@ from torch.nn import functional as F
 from torchvision.ops import roi_align
 
 from utils.assigners import LevelAssignment
-from utils.box_ops import aligned_iou, bbox2distance, box_iou, distance2bbox
+from utils.box_ops import aligned_ciou, aligned_iou, bbox2distance, box_iou, distance2bbox
 
 
 def _binary_logits_to_two_class(logits: torch.Tensor) -> torch.Tensor:
@@ -66,50 +66,38 @@ def box_kd_loss(
     teacher_det_boxes: list[torch.Tensor],
     assignments: dict[str, LevelAssignment],
     iou_match_threshold: float = 0.3,
+    teacher_weight: float = 0.25,
 ) -> torch.Tensor:
-    """Box knowledge distillation — matched-detection strategy (Fix 1).
+    """GT-anchored CIoU box distillation (P4 fix for train10).
 
-    Uses the teacher's DECODED xyxy detections (`teacher_outputs["boxes"]`,
-    a list of per-image xyxy tensors in pixel space) rather than the raw
-    internal `teacher_outputs["raw_boxes"]` DFL outputs.
+    **Problem with the old approach:**
+    The previous loss computed smooth_l1 + IoU against the *teacher's decoded
+    box* exclusively.  The teacher box is its own regression output — not
+    guaranteed to coincide with the GT annotation.  As a result the student
+    memorised the teacher's *box style* (possibly systematically offset or
+    differently scaled) rather than improving its GT IoU accuracy.  This
+    caused mAP@0.5:0.95 to *regress* from 0.228 (train8) to 0.222 (train9)
+    despite box_kd being active.
 
-    Previous attempts were broken because:
-    - raw_boxes (train3–6): teacher DFL/model-space values in [-0.8, 13],
-      NOT pixel-space LTRB. Passing these into distance2bbox gave nonsense
-      boxes; IoU=0 always → loss frozen at 24-31 forever.
-    - Intersection strategy (train6 attempt): still used raw_boxes. The
-      coordinate fix was not the root cause — the FORMAT was wrong.
+    **New loss:**
+    For each assigner-positive cell:
+      1. Compute CIoU(student_pred, GT_box) — primary signal, weight=0.75.
+         This directly measures and optimises GT localization quality.
+      2. If the GT at that cell has a high-IoU teacher match
+         (iou ≥ iou_match_threshold), add CIoU(student_pred, teacher_box)
+         as a soft regularizer, weight = teacher_weight (default 0.25).
+         This preserves the semantic of "match teacher when it's reliable".
 
-    **Matched-detection algorithm:**
-    1. For each FPN level and each image in the batch, take the
-       student-assigner positive cells (where det_loss trains the box head).
-    2. At each positive cell the assigner stores the GT box xyxy.  Find the
-       best-matching teacher detection by computing IoU between the GT xyxy
-       and every teacher-detected box for that image.
-    3. If the best match IoU > iou_match_threshold, the teacher detection is
-       a valid soft target for this cell.
-    4. Convert the matched teacher xyxy box → LTRB relative to the student
-       anchor point via bbox2distance().  This is identical coordinate system
-       to the student's box_pred (stride-normalised LTRB after Fix 3).
-    5. Compute smooth_l1 + (1-IoU) between student pred and teacher target.
-
-    **Why this works:**
-    - Teacher decoded xyxy ARE in pixel space → compatible with student coords.
-    - We only supervise at cells where det_loss also trains → no gradient
-      conflict (both losses push box head in same direction).
-    - IoU matching ensures we only distil when teacher actually detects the
-      same GT object (avoids distiling wrong person in crowds).
-
-    **Config:** box_kd weight is 0.0 by default; set to a non-zero value
-    only after verifying teacher detections are reasonable.
+    Both CIoU terms operate in decoded pixel-space xyxy.
 
     Args:
         student_boxes:       {level: (B, 4, H, W)} stride-normalised LTRB.
         teacher_det_boxes:   list[Tensor(N_i, 4)] per-image xyxy teacher dets.
         assignments:         Student assigner output (pos_mask, box_xyxy, points, stride).
-        iou_match_threshold: Min IoU between GT xyxy and teacher detection to
-                             count as a valid distillation target.
+        iou_match_threshold: Min IoU(GT, teacher) to activate teacher CIoU term.
+        teacher_weight:      Weight for the teacher soft-target CIoU term (default 0.25).
     """
+    gt_weight = 1.0 - teacher_weight
     total = next(iter(student_boxes.values())).new_tensor(0.0)
 
     for level_name, stu in student_boxes.items():
@@ -122,10 +110,11 @@ def box_kd_loss(
             total = total + stu.sum() * 0.0
             continue
 
-        # Collect matched pairs across the batch
-        pred_ltrb_list   = []
-        target_ltrb_list = []
-        points_list      = []
+        # --- Collect all positive-cell data across the batch ---
+        pred_xyxy_list  = []   # decoded student xyxy
+        gt_xyxy_list    = []   # GT xyxy (primary CIoU target)
+        tea_xyxy_list   = []   # matched teacher xyxy (secondary CIoU target)
+        tea_mask_list   = []   # bool: whether a teacher match was found per cell
 
         pts_batch = asgn.points.unsqueeze(0).expand(B, -1, -1, -1)  # (B, H, W, 2)
 
@@ -137,53 +126,52 @@ def box_kd_loss(
             # GT xyxy at positive cells — (N_pos, 4) pixel space
             gt_xyxy = asgn.box_xyxy.permute(0, 2, 3, 1)[bi][pos_i]   # (N_pos, 4)
 
-            # Teacher detections for this image — (T, 4) pixel space
+            # Decode student LTRB → xyxy (pixel space)
+            matched_points = pts_batch[bi][pos_i]                              # (N_pos, 2)
+            pred_ltrb      = stu.permute(0, 2, 3, 1)[bi][pos_i]               # (N_pos, 4) stride-norm
+            pred_xyxy      = distance2bbox(matched_points, pred_ltrb * stride) # (N_pos, 4) pixel
+
+            pred_xyxy_list.append(pred_xyxy)
+            gt_xyxy_list.append(gt_xyxy)
+
+            # --- Teacher soft target (optional per-cell) ---
             tea_boxes = teacher_det_boxes[bi]   # (T, 4)
-            if tea_boxes.numel() == 0:
-                continue
+            N_pos = gt_xyxy.shape[0]
+            has_teacher = torch.zeros(N_pos, dtype=torch.bool, device=stu.device)
+            tea_matched  = torch.zeros_like(gt_xyxy)  # (N_pos, 4) default zeros
 
-            # IoU between each GT cell position and each teacher detection
-            # gt_xyxy: (N_pos, 4), tea_boxes: (T, 4)
-            iou_mat = box_iou(gt_xyxy, tea_boxes)       # (N_pos, T)
-            best_iou, best_t = iou_mat.max(dim=1)       # (N_pos,), (N_pos,)
+            if tea_boxes.numel() > 0:
+                iou_mat  = box_iou(gt_xyxy, tea_boxes)      # (N_pos, T)
+                best_iou, best_t = iou_mat.max(dim=1)       # (N_pos,)
+                matched  = best_iou >= iou_match_threshold
+                tea_matched[matched] = tea_boxes[best_t[matched]]
+                has_teacher = matched
 
-            matched = best_iou >= iou_match_threshold    # (N_pos,) bool
-            if not matched.any():
-                continue
+            tea_xyxy_list.append(tea_matched)
+            tea_mask_list.append(has_teacher)
 
-            # Matched teacher xyxy → LTRB relative to student anchor point
-            matched_tea_xyxy  = tea_boxes[best_t[matched]]             # (N_match, 4)
-            matched_points    = pts_batch[bi][pos_i][matched]          # (N_match, 2)
-            matched_pred_ltrb = stu.permute(0, 2, 3, 1)[bi][pos_i][matched]  # (N_match, 4)
-
-            # bbox2distance: xyxy → LTRB in pixel space, then normalize by stride (Fix 3)
-            tea_ltrb_px   = bbox2distance(matched_points, matched_tea_xyxy)  # pixel LTRB
-            tea_ltrb_norm = tea_ltrb_px / stride                             # stride-norm
-
-            pred_ltrb_list.append(matched_pred_ltrb)
-            target_ltrb_list.append(tea_ltrb_norm)
-            points_list.append(matched_points)
-
-        if not pred_ltrb_list:
+        if not pred_xyxy_list:
             total = total + stu.sum() * 0.0
             continue
 
-        pred_ltrb_all   = torch.cat(pred_ltrb_list,   dim=0)   # (N_total, 4) stride-norm
-        target_ltrb_all = torch.cat(target_ltrb_list, dim=0)   # (N_total, 4) stride-norm
-        points_all      = torch.cat(points_list,       dim=0)   # (N_total, 2)
+        pred_xyxy_all = torch.cat(pred_xyxy_list, dim=0)   # (N_total, 4)
+        gt_xyxy_all   = torch.cat(gt_xyxy_list,   dim=0)   # (N_total, 4)
+        tea_xyxy_all  = torch.cat(tea_xyxy_list,  dim=0)   # (N_total, 4)
+        tea_mask_all  = torch.cat(tea_mask_list,   dim=0)   # (N_total,) bool
 
-        # Clamp teacher targets to non-negative (GT box may be partially OOB)
-        target_ltrb_all = target_ltrb_all.clamp(min=0.0)
+        # --- Primary: CIoU(pred, GT) for ALL positive cells ---
+        gt_ciou  = aligned_ciou(pred_xyxy_all, gt_xyxy_all).mean()
 
-        # Smooth-L1 on stride-normalised LTRB (O(1) scale)
-        smooth_l1 = F.smooth_l1_loss(pred_ltrb_all, target_ltrb_all)
+        # --- Secondary: CIoU(pred, teacher) only where teacher matched ---
+        if tea_mask_all.any():
+            tea_ciou = aligned_ciou(
+                pred_xyxy_all[tea_mask_all],
+                tea_xyxy_all[tea_mask_all],
+            ).mean()
+        else:
+            tea_ciou = pred_xyxy_all.sum() * 0.0
 
-        # IoU on pixel-space decoded boxes
-        pred_boxes_px   = distance2bbox(points_all, pred_ltrb_all   * stride)
-        target_boxes_px = distance2bbox(points_all, target_ltrb_all * stride)
-        iou_term = 1.0 - aligned_iou(pred_boxes_px, target_boxes_px).mean()
-
-        total = total + 0.5 * smooth_l1 + 0.5 * iou_term
+        total = total + gt_weight * gt_ciou + teacher_weight * tea_ciou
 
     return total
 
