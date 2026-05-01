@@ -144,7 +144,8 @@ def main() -> int:
         pretrained_backbone=config["student"].get("pretrained_backbone", True),
         num_id_classes=train_dataset.num_identities,
         roi_dropout=roi_dropout,
-        tower_layers=int(config["student"].get("tower_layers", 2)),  # Fix 5
+        tower_layers=int(config["student"].get("tower_layers", 2)),
+        tower_dropout=float(config["student"].get("tower_dropout", 0.0)),
     ).to(device)
 
     teacher = None
@@ -260,7 +261,11 @@ def main() -> int:
     assigner = PyramidAssigner(
         strides    ={lv: int(v) for lv, v in config["assigner"]["strides"].items()},
         area_ranges={lv: tuple(v) for lv, v in config["assigner"]["area_ranges"].items()},
-        center_radius=float(config["assigner"]["center_radius"]),
+        center_radius=(
+            {lv: float(v) for lv, v in config["assigner"]["center_radius"].items()}
+            if isinstance(config["assigner"]["center_radius"], dict)
+            else float(config["assigner"]["center_radius"])
+        ),
     )
 
     # Support both new per-loss ramp format (loss_schedule dict) and legacy

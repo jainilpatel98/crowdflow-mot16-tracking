@@ -131,6 +131,7 @@ def main() -> int:
         pretrained_backbone=False,
         num_id_classes=id_classes,
         tower_layers=int(config["student"].get("tower_layers", 2)),
+        tower_dropout=float(config["student"].get("tower_dropout", 0.0)),
     ).to(device)
     validate_checkpoint_shapes(checkpoint, model, feature_adapters=None)
     model.load_state_dict(checkpoint["student"])

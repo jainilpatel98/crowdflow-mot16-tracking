@@ -2,7 +2,7 @@ seed: 1337
 
 dataset:
   config: configs/dataset_mot16.yaml
-  batch_size: 12
+  batch_size: 24          # MobileNetV3 is very lightweight — large batch
 
 teacher:
   ckpt_path: code/yolo26x.pt
@@ -14,14 +14,20 @@ teacher:
     p4: 768
     p5: 768
   cache_root: data/teacher_cache
-  use_cache: true
+  use_cache: false        # live inference avoids cache invalidation
 
 student:
   backbone_name: mobilenetv3_large
   pretrained_backbone: true
-  fpn_channels: 192
+  fpn_channels: 192       # lighter channels for mobile model
   emb_dim: 128
   roi_dropout: 0.3
+  tower_layers: 2
+  tower_dropout: 0.0      # MobileNetV3 already uses depthwise conv — no extra dropout
+  # MobileNetV3 has fewer params; only freeze stem
+  freeze_backbone_stages: [stem]
+  freeze_backbone_stages_until_epoch: 8
+  backbone_bn_eval: true
 
 assigner:
   strides:
@@ -29,10 +35,13 @@ assigner:
     p4: 16
     p5: 32
   area_ranges:
-    p3: [0, 2304]
-    p4: [2304, 16384]
-    p5: [16384, 1000000000]
-  center_radius: 1.5
+    p3: [0, 4096]
+    p4: [2304, 20736]
+    p5: [14400, 1000000000]
+  center_radius:
+    p3: 2.5
+    p4: 2.0
+    p5: 1.5
 
 sampler:
   balance_sequences: true
@@ -40,9 +49,12 @@ sampler:
 
 optimizer:
   name: adamw
-  lr_backbone: 0.0002
-  lr_heads: 0.0008
-  weight_decay: 0.0001
+  lr_backbone: 0.0001     # higher LR for lightweight backbone (smaller capacity)
+  lr_heads: 0.0006
+  lr_neck: 0.0006
+  lr_head: 0.0006
+  lr_aux: 0.0008
+  weight_decay: 0.0003    # moderate regularization
   betas: [0.9, 0.999]
 
 scheduler:
@@ -60,36 +72,39 @@ training:
   id_label_smoothing: 0.1
   checkpoint_interval: 5
 
-phases:
-  - start_epoch: 1
-    end_epoch: 10
-    weights:
-      det: 0.5
-      cls_kd: 0.25
-      box_kd: 0.25
-      feat: 5.0
-      emb: 0.25
-      id: 0.0
-  - start_epoch: 11
-    end_epoch: 40
-    weights:
-      det: 1.0
-      cls_kd: 0.5
-      box_kd: 0.75
-      feat: 2.0
-      emb: 0.5
-      id: 0.5
-  - start_epoch: 41
-    end_epoch: 60
-    weights:
-      det: 2.0
-      cls_kd: 0.5
-      box_kd: 0.5
-      feat: 0.5
-      emb: 0.3
-      id: 0.5
+loss_schedule:
+  det:
+    - [1, 5, 0.8, 1.0]
+    - [5, 60, 1.0, 1.0]
+
+  cls_kd:
+    - [1, 5, 0.02, 0.02]
+    - [5, 15, 0.02, 0.05]
+    - [15, 60, 0.05, 0.05]
+
+  # box_kd early for MobileNet — lighter models converge faster
+  box_kd:
+    - [1, 8, 0.0, 0.0]
+    - [8, 18, 0.0, 0.4]
+    - [18, 60, 0.4, 0.4]
+
+  feat:
+    - [1, 5, 0.0, 0.0]
+    - [5, 15, 0.0, 0.8]
+    - [15, 60, 0.8, 0.8]
+
+  emb:
+    - [1, 18, 0.0, 0.0]
+    - [18, 25, 0.0, 0.15]
+    - [25, 60, 0.15, 0.15]
+
+  id:
+    - [1, 20, 0.0, 0.0]
+    - [20, 30, 0.0, 0.01]
+    - [30, 60, 0.01, 0.01]
 
 inference:
-  score_threshold: 0.05
+  # MobileNetV3 lower capacity → scores less calibrated; start at 0.35
+  score_threshold: 0.35
   nms_iou_threshold: 0.5
   max_detections: 300

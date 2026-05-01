@@ -37,14 +37,16 @@ class StudentJDE(nn.Module):
         pretrained_backbone: bool = False,
         num_id_classes: int = 0,
         roi_dropout: float = 0.0,
-        tower_layers: int = 2,   # Fix 5: configurable head depth (2→3 in yaml)
+        tower_layers: int = 2,
+        tower_dropout: float = 0.0,   # P5: head regularization; 0.1 for large backbones
     ) -> None:
         super().__init__()
         self.backbone = build_backbone(backbone_name, pretrained=pretrained_backbone)
         self.neck = TinyFPN(self.backbone.out_channels, out_channels=fpn_channels)
         self.head = DetectionEmbeddingHead(
             fpn_channels, num_classes=num_classes, emb_dim=emb_dim,
-            tower_layers=tower_layers,  # Fix 5
+            tower_layers=tower_layers,
+            tower_dropout=tower_dropout,
         )
         self.roi_projector = ROIProjector(fpn_channels, emb_dim, dropout=roi_dropout)
         self.id_classifier = nn.Linear(emb_dim, num_id_classes) if num_id_classes > 0 else None

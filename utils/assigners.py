@@ -39,10 +39,12 @@ class PyramidAssigner:
         self,
         strides: dict[str, int],
         area_ranges: dict[str, tuple[float, float]],
-        center_radius: float = 1.5,
+        center_radius: float | dict[str, float] = 1.5,
     ) -> None:
         self.strides = strides
         self.area_ranges = area_ranges
+        # Allow per-level radius: {p3: 2.5, p4: 2.0, p5: 1.5}
+        # or a single scalar applied to all levels.
         self.center_radius = center_radius
 
     def assign(
@@ -97,13 +99,19 @@ class PyramidAssigner:
                 cx = (0.5 * (boxes[:, 0] + boxes[:, 2]) / stride - 0.5)  # (M,)
                 cy = (0.5 * (boxes[:, 1] + boxes[:, 3]) / stride - 0.5)  # (M,)
 
+                # Per-level radius (dict) or global scalar
+                if isinstance(self.center_radius, dict):
+                    radius = float(self.center_radius[level_name])
+                else:
+                    radius = float(self.center_radius)
+
                 # Distance from each grid cell to each GT centre
                 # gx: (W,)  cx: (M,)  → diff_x: (M, W)
                 diff_x = (gx.unsqueeze(0) - cx.unsqueeze(1)).abs()   # (M, W)
                 diff_y = (gy.unsqueeze(0) - cy.unsqueeze(1)).abs()   # (M, H)
 
-                within_x = diff_x <= self.center_radius   # (M, W)
-                within_y = diff_y <= self.center_radius   # (M, H)
+                within_x = diff_x <= radius   # (M, W)
+                within_y = diff_y <= radius   # (M, H)
 
                 # (M, H, W) via broadcasting
                 center_mask = within_y.unsqueeze(2) & within_x.unsqueeze(1)

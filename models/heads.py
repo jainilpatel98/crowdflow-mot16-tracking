@@ -6,13 +6,14 @@ from torch.nn import functional as F
 
 
 class ConvTower(nn.Module):
-    """Stacked Conv → GroupNorm → SiLU blocks.
+    """Stacked Conv → GroupNorm → SiLU (→ optional Dropout) blocks.
 
     Fix 5: GroupNorm replaces BatchNorm for training stability on small MOT
     batches.  The number of groups is capped to min(32, out_channels) and
     auto-adjusted to guarantee divisibility.
 
     num_layers is configurable (default 2 → pass 3 for deeper heads).
+    tower_dropout inserts a Dropout2d after each SiLU (default 0.0 = off).
     """
 
     def __init__(
@@ -21,6 +22,7 @@ class ConvTower(nn.Module):
         hidden_channels: int,
         num_layers: int = 2,
         groups: int = 32,
+        dropout: float = 0.0,
     ) -> None:
         super().__init__()
         layers = []
@@ -37,6 +39,8 @@ class ConvTower(nn.Module):
                     nn.SiLU(inplace=True),
                 ]
             )
+            if dropout > 0.0:
+                layers.append(nn.Dropout2d(p=dropout))
             current_channels = hidden_channels
         self.block = nn.Sequential(*layers)
 
@@ -81,15 +85,17 @@ class DetectionEmbeddingHead(nn.Module):
         num_classes: int = 1,
         emb_dim: int = 128,
         tower_layers: int = 2,
+        tower_dropout: float = 0.0,   # P5: regularize head; 0.1 for large backbones
     ) -> None:
         super().__init__()
-        self.cls_tower = ConvTower(in_channels, in_channels, num_layers=tower_layers)
-        self.box_tower = ConvTower(in_channels, in_channels, num_layers=tower_layers)
-        self.emb_tower = ConvTower(in_channels, in_channels, num_layers=tower_layers)
+        _kw = dict(num_layers=tower_layers, dropout=tower_dropout)
+        self.cls_tower = ConvTower(in_channels, in_channels, **_kw)
+        self.box_tower = ConvTower(in_channels, in_channels, **_kw)
+        self.emb_tower = ConvTower(in_channels, in_channels, **_kw)
         # obj_tower kept for training centerness target (Fix 4: removed from
         # inference score, but centerness supervision still trains the head
         # which can be used for future quality-aware scoring).
-        self.obj_tower = ConvTower(in_channels, in_channels, num_layers=tower_layers)
+        self.obj_tower = ConvTower(in_channels, in_channels, **_kw)
 
         self.cls_pred = nn.Conv2d(in_channels, num_classes, kernel_size=1)
         self.obj_pred = nn.Conv2d(in_channels, 1, kernel_size=1)

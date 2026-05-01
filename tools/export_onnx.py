@@ -63,6 +63,7 @@ def main() -> int:
         pretrained_backbone=False,
         num_id_classes=id_classes,
         tower_layers=int(config["student"].get("tower_layers", 2)),
+        tower_dropout=float(config["student"].get("tower_dropout", 0.0)),
     )
     model.load_state_dict(checkpoint["student"])
     model.eval()
