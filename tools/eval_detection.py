@@ -29,6 +29,7 @@ if str(ROOT) not in sys.path:
 from datasets.collate import mot_collate_fn
 from datasets.mot16_dataset import build_mot16_datasets
 from engine.evaluator import (
+    _compute_ap_all_thresholds_cached,
     collect_raw_predictions,
     compute_metrics_at_threshold,
     evaluate_detection,
@@ -182,21 +183,35 @@ def _sweep_rank(summary, threshold: float) -> tuple[float, float, float, float]:
 
 
 def _run_sweep(args, model, loader, device, strides, nms_iou_threshold: float) -> None:
-    """Collect predictions once, then sweep thresholds analytically."""
-    print("Collecting raw predictions (single inference pass)…")
+    """Collect predictions once, then sweep thresholds analytically.
+
+    Speed improvements vs naive implementation:
+    - NMS runs once on GPU per image during collection (not once per threshold)
+    - IoU matrices are precomputed on GPU and cached in RAM
+    - AP is computed once (10 IoU thresholds) using cached matrices, not 130×
+    - Threshold sweep only does cheap score-threshold filtering
+    """
+    print("Collecting raw predictions (NMS on GPU, IoU matrices cached)…")
     raw_preds, gt_by_image, gt_count = collect_raw_predictions(
         model, loader, device=device,
         strides=strides,
         nms_iou_threshold=nms_iou_threshold,
         model_type=args.model_type,
     )
-    raw_candidate_count = sum(item["boxes"].shape[0] for item in raw_preds.values())
+    nms_candidate_count = sum(item["boxes"].shape[0] for item in raw_preds.values())
     print(
-        f"Collected {raw_candidate_count:,} raw candidates over {len(gt_by_image)} images "
+        f"Collected {nms_candidate_count:,} post-NMS candidates over {len(gt_by_image)} images "
         f"({gt_count:,} GT boxes).\n"
     )
 
-    # Build threshold list with float precision rounding
+    # ── Compute AP ONCE (threshold-independent) before the sweep loop ──────
+    # This is the key speedup: AP at 10 IoU thresholds uses cached IoU matrices
+    # and is computed once, not once per threshold (was 130× before).
+    print("Computing mAP (once, threshold-independent)…")
+    ap_values = _compute_ap_all_thresholds_cached(raw_preds, gt_count)
+    print(f"  mAP@0.5={ap_values[0]:.4f}  mAP@0.5:0.95={sum(ap_values)/len(ap_values):.4f}\n")
+
+    # Build threshold list
     thresholds: list[float] = []
     t = args.threshold_min
     while t <= args.threshold_max + 1e-9:
@@ -215,18 +230,22 @@ def _run_sweep(args, model, loader, device, strides, nms_iou_threshold: float) -
     print(sep)
 
     best_thresh = thresholds[0]
-    best_rank = None
-    results = []
+    best_rank   = None
+    results     = []
 
     for thresh in thresholds:
-        m = compute_metrics_at_threshold(raw_preds, gt_by_image, gt_count, thresh)
+        # Pass precomputed AP — only P/R/F1/pred_count is recomputed per threshold
+        m = compute_metrics_at_threshold(
+            raw_preds, gt_by_image, gt_count, thresh,
+            precomputed_ap_values=ap_values,
+        )
         results.append((thresh, m))
         marker = ""
         rank = _sweep_rank(m, thresh)
         if best_rank is None or rank > best_rank:
-            best_rank = rank
+            best_rank   = rank
             best_thresh = thresh
-            marker = " <-- best F1 so far"
+            marker      = " <-- best F1 so far"
 
         print(
             f"{thresh:7.3f}  {m.map50:{col_w}.4f}  {m.map50_95:{col_w+3}.4f}  "
