@@ -6,3 +6,4 @@ tracker:
   cosine_threshold: 0.25
   nn_budget: 100
   use_kalman_filter: true
+  reid_weights: /home/research/tracking_crowded_people/runs/reid_osnet_x0_25_mot16/osnet_x0_25_mot16_best.pt
