@@ -28,6 +28,7 @@ build/
 *~
 .DS_Store
 .codex/
+.codex
 
 # Large Model Files (Pre-trained weights)
 *.pt
