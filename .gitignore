@@ -49,7 +49,6 @@ MOT16.zip
 *.7z
 
 # Training & Inference Outputs
-runs/
 output/
 outputs/
 *.log

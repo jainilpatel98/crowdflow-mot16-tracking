@@ -1,0 +1,12 @@
+{
+  "id_switches_no_reid": 108.5,
+  "id_switches_trained_reid": 107.0,
+  "id_switch_reduction": 1.5,
+  "id_switch_reduction_percent": 1.3824884792626728,
+  "idf1_no_reid": 0.5542001823873594,
+  "idf1_trained_reid": 0.5514141491007787,
+  "idf1_delta": -0.002786033286580669,
+  "mota_no_reid": 0.4628683035379401,
+  "mota_trained_reid": 0.4579264647685079,
+  "mota_delta": -0.004941838769432216
+}

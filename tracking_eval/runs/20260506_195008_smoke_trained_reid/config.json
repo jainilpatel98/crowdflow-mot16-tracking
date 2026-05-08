@@ -1,0 +1,17 @@
+{
+  "project_root": "/home/research/crowdflow-mot16-tracking",
+  "model": "/home/research/crowdflow-mot16-tracking/code/yolo26x.pt",
+  "tracker": "/home/research/crowdflow-mot16-tracking/tracking_eval/botsort_trained_reid.yaml",
+  "split": "train",
+  "sequences": [
+    "MOT16-05"
+  ],
+  "conf": 0.25,
+  "iou": 0.5,
+  "imgsz": 960,
+  "persist": true,
+  "person_only": true,
+  "max_frames": 5,
+  "device": "cuda",
+  "save_previews": false
+}

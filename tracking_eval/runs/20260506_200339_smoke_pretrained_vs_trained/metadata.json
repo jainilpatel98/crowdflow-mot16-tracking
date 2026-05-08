@@ -1,0 +1,22 @@
+[
+  {
+    "condition": "pretrained_reid",
+    "sequences": [
+      {
+        "sequence": "MOT16-05",
+        "frames": 5,
+        "unique_track_ids": 7
+      }
+    ]
+  },
+  {
+    "condition": "trained_reid",
+    "sequences": [
+      {
+        "sequence": "MOT16-05",
+        "frames": 5,
+        "unique_track_ids": 7
+      }
+    ]
+  }
+]

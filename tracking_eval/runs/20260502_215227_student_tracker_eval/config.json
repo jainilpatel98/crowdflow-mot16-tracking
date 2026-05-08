@@ -1,0 +1,18 @@
+{
+  "student_config": "configs/student_distill_resnet50.yaml",
+  "checkpoint": "runs/student_distill_resnet50/best.pt",
+  "tracker_config": "configs/tracker.yaml",
+  "tracker_name": "strongsort",
+  "device": "cuda",
+  "split": "train",
+  "sequences": [
+    "MOT16-02",
+    "MOT16-04",
+    "MOT16-05",
+    "MOT16-09",
+    "MOT16-10",
+    "MOT16-11",
+    "MOT16-13"
+  ],
+  "max_frames": null
+}

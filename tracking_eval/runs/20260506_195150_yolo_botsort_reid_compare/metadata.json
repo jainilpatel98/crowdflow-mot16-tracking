@@ -1,0 +1,32 @@
+[
+  {
+    "condition": "no_reid",
+    "sequences": [
+      {
+        "sequence": "MOT16-05",
+        "frames": 837,
+        "unique_track_ids": 204
+      },
+      {
+        "sequence": "MOT16-10",
+        "frames": 654,
+        "unique_track_ids": 158
+      }
+    ]
+  },
+  {
+    "condition": "trained_reid",
+    "sequences": [
+      {
+        "sequence": "MOT16-05",
+        "frames": 837,
+        "unique_track_ids": 230
+      },
+      {
+        "sequence": "MOT16-10",
+        "frames": 654,
+        "unique_track_ids": 175
+      }
+    ]
+  }
+]

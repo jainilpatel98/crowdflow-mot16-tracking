@@ -1,0 +1,21 @@
+{
+  "train_sequences": [
+    "MOT16-02",
+    "MOT16-04",
+    "MOT16-09",
+    "MOT16-11",
+    "MOT16-13"
+  ],
+  "val_sequences": [
+    "MOT16-05",
+    "MOT16-10"
+  ],
+  "class_ids": [
+    1,
+    2
+  ],
+  "min_visibility": 0.25,
+  "num_train_ids": 327,
+  "num_train_samples": 70002,
+  "num_val_samples": 14910
+}

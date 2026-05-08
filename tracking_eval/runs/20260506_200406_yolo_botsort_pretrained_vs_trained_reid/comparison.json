@@ -1,0 +1,16 @@
+{
+  "id_switches_total_pretrained_reid": 220.0,
+  "id_switches_total_trained_reid": 214.0,
+  "id_switch_total_reduction": 6.0,
+  "id_switch_total_reduction_percent": 2.727272727272727,
+  "id_switches_mean_pretrained_reid": 110.0,
+  "id_switches_mean_trained_reid": 107.0,
+  "id_switch_mean_reduction": 3.0,
+  "id_switch_mean_reduction_percent": 2.727272727272727,
+  "idf1_pretrained_reid": 0.54860158608575,
+  "idf1_trained_reid": 0.5514141491007787,
+  "idf1_delta": 0.002812563015028635,
+  "mota_pretrained_reid": 0.45695092324830344,
+  "mota_trained_reid": 0.4579264647685079,
+  "mota_delta": 0.0009755415202044593
+}

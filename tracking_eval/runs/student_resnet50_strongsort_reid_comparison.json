@@ -1,0 +1,126 @@
+{
+  "detector": "ResNet50 student",
+  "student_config": "configs/student_distill_resnet50.yaml",
+  "checkpoint": "runs/student_distill_resnet50/best.pt",
+  "tracker": "StrongSORT",
+  "sequences": [
+    "MOT16-05",
+    "MOT16-10"
+  ],
+  "pretrained_reid_metrics": {
+    "mota": {
+      "MOT16-05": 0.3245819889,
+      "MOT16-10": 0.2240623478,
+      "OVERALL": 0.2598766722
+    },
+    "motp": {
+      "MOT16-05": 0.2765064779,
+      "MOT16-10": 0.2737567595,
+      "OVERALL": 0.2750545181
+    },
+    "idf1": {
+      "MOT16-05": 0.5452418097,
+      "MOT16-10": 0.3940279475,
+      "OVERALL": 0.4552953446
+    },
+    "idp": {
+      "MOT16-05": 0.582305898,
+      "MOT16-10": 0.57019837,
+      "OVERALL": 0.5760095962
+    },
+    "idr": {
+      "MOT16-05": 0.5126136697,
+      "MOT16-10": 0.3010228933,
+      "OVERALL": 0.3764109532
+    },
+    "precision": {
+      "MOT16-05": 0.7010996335,
+      "MOT16-10": 0.7239735507,
+      "OVERALL": 0.7129948021
+    },
+    "recall": {
+      "MOT16-05": 0.6171897917,
+      "MOT16-10": 0.3822049034,
+      "OVERALL": 0.4659280936
+    },
+    "num_switches": {
+      "MOT16-05": 201,
+      "MOT16-10": 153,
+      "OVERALL": 354
+    },
+    "num_false_positives": {
+      "MOT16-05": 1794,
+      "MOT16-10": 1795,
+      "OVERALL": 3589
+    },
+    "num_misses": {
+      "MOT16-05": 2610,
+      "MOT16-10": 7610,
+      "OVERALL": 10220
+    }
+  },
+  "trained_reid_metrics": {
+    "mota": {
+      "MOT16-05": 0.3134350249,
+      "MOT16-10": 0.2203279753,
+      "OVERALL": 0.2535012542
+    },
+    "motp": {
+      "MOT16-05": 0.2772192286,
+      "MOT16-10": 0.2743516114,
+      "OVERALL": 0.2757126225
+    },
+    "idf1": {
+      "MOT16-05": 0.4869097889,
+      "MOT16-10": 0.4099175301,
+      "OVERALL": 0.4413136721
+    },
+    "idp": {
+      "MOT16-05": 0.5108748188,
+      "MOT16-10": 0.5876023037,
+      "OVERALL": 0.5504099961
+    },
+    "idr": {
+      "MOT16-05": 0.4650924025,
+      "MOT16-10": 0.314742653,
+      "OVERALL": 0.3683110368
+    },
+    "precision": {
+      "MOT16-05": 0.6882551957,
+      "MOT16-10": 0.7167323431,
+      "OVERALL": 0.7029285435
+    },
+    "recall": {
+      "MOT16-05": 0.6265767087,
+      "MOT16-10": 0.3839097256,
+      "OVERALL": 0.4703699833
+    },
+    "num_switches": {
+      "MOT16-05": 200,
+      "MOT16-10": 146,
+      "OVERALL": 346
+    },
+    "num_false_positives": {
+      "MOT16-05": 1935,
+      "MOT16-10": 1869,
+      "OVERALL": 3804
+    },
+    "num_misses": {
+      "MOT16-05": 2546,
+      "MOT16-10": 7589,
+      "OVERALL": 10135
+    }
+  },
+  "summary": {
+    "id_switches_pretrained_reid": 354,
+    "id_switches_trained_reid": 346,
+    "id_switch_reduction": 8,
+    "id_switch_reduction_percent": 2.2598870056497176,
+    "idf1_pretrained_reid": 0.4552953446,
+    "idf1_trained_reid": 0.4413136721,
+    "idf1_delta": -0.013981672499999986,
+    "mota_pretrained_reid": 0.2598766722,
+    "mota_trained_reid": 0.2535012542,
+    "mota_delta": -0.006375417999999966
+  }
+}

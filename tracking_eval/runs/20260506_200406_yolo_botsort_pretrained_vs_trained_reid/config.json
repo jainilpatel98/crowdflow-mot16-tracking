@@ -1,0 +1,24 @@
+{
+  "model": "code/yolo26x.pt",
+  "pretrained_reid_weights": "/home/research/tracking_crowded_people/.venv/lib/python3.12/site-packages/models/osnet_x0_25_msmt17.pt",
+  "trained_reid_weights": "runs/reid_osnet_x0_25_mot16/osnet_x0_25_mot16_best.pt",
+  "data_root": "MOT16",
+  "split": "train",
+  "sequences": [
+    "MOT16-05",
+    "MOT16-10"
+  ],
+  "output_root": "tracking_eval/runs",
+  "run_name": "yolo_botsort_pretrained_vs_trained_reid",
+  "conf": 0.25,
+  "iou": 0.5,
+  "imgsz": 960,
+  "max_frames": 0,
+  "device": "cuda",
+  "half": true,
+  "gt_class_ids": [
+    1,
+    2
+  ],
+  "run_dir": "tracking_eval/runs/20260506_200406_yolo_botsort_pretrained_vs_trained_reid"
+}

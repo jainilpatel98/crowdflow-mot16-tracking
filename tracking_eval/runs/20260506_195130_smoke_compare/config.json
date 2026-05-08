@@ -1,0 +1,22 @@
+{
+  "model": "code/yolo26x.pt",
+  "reid_weights": "runs/reid_osnet_x0_25_mot16/osnet_x0_25_mot16_best.pt",
+  "data_root": "MOT16",
+  "split": "train",
+  "sequences": [
+    "MOT16-05"
+  ],
+  "output_root": "tracking_eval/runs",
+  "run_name": "smoke_compare",
+  "conf": 0.25,
+  "iou": 0.5,
+  "imgsz": 960,
+  "max_frames": 5,
+  "device": "cuda",
+  "half": true,
+  "gt_class_ids": [
+    1,
+    2
+  ],
+  "run_dir": "tracking_eval/runs/20260506_195130_smoke_compare"
+}
