@@ -15,15 +15,16 @@
 #               Example:  ./QUICK_START.sh train resnext101 --port 29501
 #
 # COMMANDS:
-#   train       Full student distillation run (default student = ResNet50)
-#   smoke       2-epoch smoke test to verify the pipeline works
-#   cache       (optional) Pre-compute teacher cache, then train with cache
-#   eval        Evaluate detection quality on MOT16 val sequences
-#   track       Run tracking on a single MOT16 sequence
-#   monitor     Watch live training metrics
-#   export      Export best checkpoint to ONNX
-#   check       Check if a training process is currently running
-#   help        Show this help
+#   train              Full student distillation run (default student = ResNet50)
+#   smoke              2-epoch smoke test to verify the pipeline works
+#   cache              (optional) Pre-compute teacher cache, then train with cache
+#   eval               Evaluate detection quality on MOT16 val sequences
+#   track              Run tracking on a single MOT16 sequence
+#   eval_with_tracking Evaluate tracking metrics (MOTA, IDF1, etc.) on MOT16 sequences
+#   monitor            Watch live training metrics
+#   export             Export best checkpoint to ONNX
+#   check              Check if a training process is currently running
+#   help               Show this help
 #
 # =============================================================================
 # CACHE vs LIVE TEACHER — how to control it:
@@ -43,9 +44,12 @@
 
 set -e
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-VENV="$ROOT/.venv/bin/python"
-# If no .venv, fall back to whatever python3 is active
-PYTHON="${VENV:-python3}"
+# Use .venv if it exists, otherwise fall back to active python3
+if [ -f "$ROOT/.venv/bin/python" ]; then
+    PYTHON="$ROOT/.venv/bin/python"
+else
+    PYTHON="python3"
+fi
 NGPU="${NGPU:-4}"    # default 4; override via --gpus N flag or NGPU=N env var
 PORT="${MASTER_PORT:-29500}"  # default torchrun port; override via --port N flag
 
@@ -350,6 +354,38 @@ do_monitor() {
     "$PYTHON" monitor_training.py "$output_dir"
 }
 
+do_eval_with_tracking() {
+    local variant="resnet50"
+    local args=()
+    
+    # Parse arguments for optional student variant and flags
+    while [[ $# -gt 0 ]]; do
+        if _is_student_variant "$1"; then
+            variant="$(_student_variant_key "$1")"
+        else
+            args+=("$1")
+        fi
+        shift
+    done
+    
+    local config
+    config="$(_student_config "$variant")" || { echo "Unknown student variant: $variant"; exit 1; }
+    local variant_label
+    variant_label="$(_student_variant_label "$variant")"
+    local output_dir
+    output_dir="$(_student_output_dir "$variant")"
+    local ckpt="$output_dir/best.pt"
+    
+    _header "Evaluate $variant_label Tracking Metrics on MOT16 Val Sequences"
+    _cmd "python tools/eval_student_tracking.py --config $config --checkpoint $ckpt --tracker-config configs/tracker.yaml ${args[@]}"
+    cd "$ROOT"
+    "$PYTHON" tools/eval_student_tracking.py \
+        --config "$config" \
+        --checkpoint "$ckpt" \
+        --tracker-config "configs/tracker.yaml" \
+        "${args[@]}"
+}
+
 do_export() {
     local variant="${1:-resnet50}"
     local config
@@ -449,6 +485,22 @@ do_help() {
         --sequence-dir MOT16/train/MOT16-10 \
         --output outputs/student_tracking/MOT16-10.txt
 
+  Tracking evaluation with metrics (MOTA, IDF1, precision, recall, num_switches, etc.):
+    ./QUICK_START.sh eval_with_tracking
+    ./QUICK_START.sh eval_with_tracking resnext101
+    ./QUICK_START.sh eval_with_tracking --sequences MOT16-11,MOT16-13
+    ./QUICK_START.sh eval_with_tracking resnet101 --run-name custom_eval --max-frames 300
+    # Available sequences (train split, all have GT): MOT16-02, MOT16-04, MOT16-05, MOT16-09, MOT16-10, MOT16-11, MOT16-13
+    # Available sequences (test split, no GT): MOT16-01, MOT16-03, MOT16-06, MOT16-07, MOT16-08, MOT16-12, MOT16-14
+    ./QUICK_START.sh eval_with_tracking --split test --sequences MOT16-01,MOT16-03
+    # or:
+    python tools/eval_student_tracking.py \
+        --config configs/student_distill_resnet50.yaml \
+        --checkpoint runs/student_distill_resnet50/best.pt \
+        --tracker-config configs/tracker.yaml \
+        --split train \
+        --sequences MOT16-02,MOT16-04,MOT16-05,MOT16-09,MOT16-10,MOT16-11,MOT16-13
+
   EXPORT
   ─────────────────────────────────────────────────────────────────────────────
   Export to ONNX:
@@ -525,16 +577,17 @@ done
 set -- "${ARGS[@]}"
 
 case "${1:-help}" in
-    train)        do_train "${2:-resnet50}" ;;
-    smoke)        do_smoke ;;
-    cache)        do_cache "${2:-resnet50}" ;;
-    train-cache)  do_train_cache "${2:-resnet50}" ;;
-    eval)         do_eval "${2:-}" "${3:-}" "${4:-}" ;;
-    track)        do_track "${2:-}" "${3:-}" "${4:-}" ;;
-    monitor)      do_monitor "${2:-resnet50}" ;;
-    export)       do_export "${2:-resnet50}" ;;
-    check)        check_training ;;
-    help|--help|-h) do_help ;;
+    train)              do_train "${2:-resnet50}" ;;
+    smoke)              do_smoke ;;
+    cache)              do_cache "${2:-resnet50}" ;;
+    train-cache)        do_train_cache "${2:-resnet50}" ;;
+    eval)               do_eval "${2:-}" "${3:-}" "${4:-}" ;;
+    track)              do_track "${2:-}" "${3:-}" "${4:-}" ;;
+    eval_with_tracking) shift; do_eval_with_tracking "$@" ;;
+    monitor)            do_monitor "${2:-resnet50}" ;;
+    export)             do_export "${2:-resnet50}" ;;
+    check)              check_training ;;
+    help|--help|-h)     do_help ;;
     *)
         echo "Unknown command: $1"
         do_help
